@@ -49,8 +49,8 @@ STATE_FILE = "/mnt/data/askian_state.json"
 LOG_FILE = "/mnt/data/askian_log.txt"
 
 # Safety limits
-MAX_REPLIES_PER_HOUR = 10          # Global rate limit
-MAX_REPLIES_PER_SENDER_PER_HOUR = 10  # Per-sender rate limit
+MAX_REPLIES_PER_HOUR = 50          # Global rate limit
+MAX_REPLIES_PER_SENDER_PER_HOUR = 50  # Per-sender rate limit
 MAX_REPLY_TOKENS = 800              # Keep responses reasonable
 
 # ============================================================
