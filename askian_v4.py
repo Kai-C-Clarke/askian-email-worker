@@ -905,6 +905,10 @@ def fetch_and_reply():
 
             # Get conversation history for this user and character
             conversation_history = get_conversation_history(state, actual_sender, persona_key)
+            if conversation_history:
+                logging.info(f"  Loaded {len(conversation_history)} previous exchange(s) with {persona_key}")
+            else:
+                logging.info(f"  No previous conversation history with {persona_key}")
             
             reply_text = generate_reply(body, persona_key, persona, conversation_history)
             success = send_reply(actual_sender, subject, reply_text, msg, persona)
@@ -913,6 +917,7 @@ def fetch_and_reply():
                 log_reply(state, actual_sender, message_id)
                 # Save this exchange to conversation history
                 save_conversation_exchange(state, actual_sender, persona_key, body, reply_text)
+                logging.info(f"  Saved conversation exchange to history")
                 save_state(state)  # Persist conversation history immediately
 
             # Small delay between replies
