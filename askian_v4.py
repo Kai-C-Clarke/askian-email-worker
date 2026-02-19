@@ -541,11 +541,15 @@ PERSONAS = {
 # ============================================================
 
 def load_state():
-    """Load replied message IDs and rate limit state."""
+    """Load replied message IDs, rate limit state, and conversation histories."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"replied_ids": [], "reply_log": []}
+            state = json.load(f)
+            # Ensure conversations key exists
+            if "conversations" not in state:
+                state["conversations"] = {}
+            return state
+    return {"replied_ids": [], "reply_log": [], "conversations": {}}
 
 def save_state(state):
     """Save state to disk."""
@@ -554,6 +558,8 @@ def save_state(state):
     # Keep only last 24h of reply log
     cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
     state["reply_log"] = [r for r in state["reply_log"] if r["time"] > cutoff]
+    # Prune old conversation histories (older than 6 months)
+    prune_old_conversations(state, days=180)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -679,7 +685,56 @@ def should_skip(msg, state):
 # DEEPSEEK API
 # ============================================================
 
-def generate_reply(email_body, persona_key, persona):
+def get_conversation_history(state, user_email, persona_key, max_exchanges=3):
+    """Get recent conversation history for this user with this character."""
+    conversations = state.get("conversations", {})
+    user_convos = conversations.get(user_email, {})
+    character_history = user_convos.get(persona_key, [])
+    
+    # Return only the most recent exchanges
+    return character_history[-max_exchanges:] if character_history else []
+
+def save_conversation_exchange(state, user_email, persona_key, user_message, character_reply, max_history=5):
+    """Save this exchange to conversation history."""
+    if "conversations" not in state:
+        state["conversations"] = {}
+    if user_email not in state["conversations"]:
+        state["conversations"][user_email] = {}
+    if persona_key not in state["conversations"][user_email]:
+        state["conversations"][user_email][persona_key] = []
+    
+    # Add new exchange
+    exchange = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "user_message": user_message[:500],  # Truncate to save space
+        "character_reply": character_reply[:1000]
+    }
+    state["conversations"][user_email][persona_key].append(exchange)
+    
+    # Keep only last N exchanges per character
+    state["conversations"][user_email][persona_key] = \
+        state["conversations"][user_email][persona_key][-max_history:]
+
+def prune_old_conversations(state, days=180):
+    """Remove conversation history older than N days."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    conversations = state.get("conversations", {})
+    
+    for user_email in list(conversations.keys()):
+        for persona_key in list(conversations[user_email].keys()):
+            # Filter out old exchanges
+            conversations[user_email][persona_key] = [
+                ex for ex in conversations[user_email][persona_key]
+                if ex.get("timestamp", "") > cutoff
+            ]
+            # Remove empty character histories
+            if not conversations[user_email][persona_key]:
+                del conversations[user_email][persona_key]
+        # Remove empty user histories
+        if not conversations[user_email]:
+            del conversations[user_email]
+
+def generate_reply(email_body, persona_key, persona, conversation_history=None):
     """Generate a reply using DeepSeek API."""
     import requests
 
@@ -691,6 +746,16 @@ def generate_reply(email_body, persona_key, persona):
         )
 
     try:
+        # Build context with conversation history if available
+        history_context = ""
+        if conversation_history:
+            history_context = "Previous correspondence with this person:\n\n"
+            for i, exchange in enumerate(conversation_history, 1):
+                history_context += f"Letter {i}:\n"
+                history_context += f"They wrote: {exchange['user_message'][:200]}\n"
+                history_context += f"You replied: {exchange['character_reply'][:300]}\n\n"
+            history_context += "---\n\n"
+        
         response = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
             headers={
@@ -704,6 +769,7 @@ def generate_reply(email_body, persona_key, persona):
                 "messages": [
                     {"role": "system", "content": persona["system_prompt"]},
                     {"role": "user", "content": (
+                        f"{history_context}"
                         f"You have received the following letter. "
                         f"Compose a reply in character.\n\n"
                         f"---\n{email_body[:2000]}\n---\n\n"
@@ -837,11 +903,17 @@ def fetch_and_reply():
                 logging.info(f"  Skipping: empty email body")
                 continue
 
-            reply_text = generate_reply(body, persona_key, persona)
+            # Get conversation history for this user and character
+            conversation_history = get_conversation_history(state, actual_sender, persona_key)
+            
+            reply_text = generate_reply(body, persona_key, persona, conversation_history)
             success = send_reply(actual_sender, subject, reply_text, msg, persona)
 
             if success:
                 log_reply(state, actual_sender, message_id)
+                # Save this exchange to conversation history
+                save_conversation_exchange(state, actual_sender, persona_key, body, reply_text)
+                save_state(state)  # Persist conversation history immediately
 
             # Small delay between replies
             time.sleep(2)
