@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-AskIan v4 - Historical Figure Email Personas
-============================================
-Send an email to henry@askian.net and get a reply from Henry VIII.
-Send to shakespeare@askian.net and get iambic pentameter.
+AskIan v4 - The Cast Email Personas
+====================================
+Send an email to any character and get a reply in their voice.
 
 Uses DeepSeek API (cheap as chips), Zoho Mail IMAP/SMTP.
-Built with loop protection so Tim doesn't get carpet-bombed again.
+Built with loop protection and conversation memory.
 
 Aliases configured in Zoho Mail:
-  henry@askian.net      → Henry VIII
-  tesla@askian.net      → Nikola Tesla
+  henry@askian.net       → Henry VIII
+  tesla@askian.net       → Nikola Tesla
   shakespeare@askian.net → William Shakespeare
-  ada@askian.net        → Ada Lovelace
-  davinci@askian.net    → Leonardo da Vinci
-  churchill@askian.net  → Winston Churchill
+  ada@askian.net         → Ada Lovelace
+  davinci@askian.net     → Leonardo da Vinci
+  churchill@askian.net   → Winston Churchill
+  dave@askian.net        → Dave Nutley (conspiracy theorist)
+  chantelle@askian.net   → Chantelle Briggs (music tech student)
+  jade@askian.net        → Jade Rampling-Cross (footballer's wife)
+  tarquin@askian.net     → Tarquin Worthington-Smythe (performative MP)
+  pearl@askian.net       → Pearl (educator, poet, gardener)
+  askian@askian.net      → Ian (the helpful one)
 
 All aliases deliver to askian@askian.net inbox.
 
