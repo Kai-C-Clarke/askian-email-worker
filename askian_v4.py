@@ -58,8 +58,8 @@ STATE_FILE = "/mnt/data/askian_state.json"
 LOG_FILE = "/mnt/data/askian_log.txt"
 
 # Safety limits
-MAX_REPLIES_PER_HOUR = 10          # Global rate limit
-MAX_REPLIES_PER_SENDER_PER_HOUR = 10  # Per-sender rate limit
+MAX_REPLIES_PER_HOUR = 30          # Global rate limit
+MAX_REPLIES_PER_SENDER_PER_HOUR = 30  # Per-sender rate limit
 MAX_REPLY_TOKENS = 800              # Keep responses reasonable
 
 # ============================================================
@@ -871,6 +871,20 @@ def should_skip(msg, state):
     # Skip mailer-daemon / postmaster
     if any(x in from_addr for x in ["mailer-daemon", "postmaster", "noreply", "no-reply"]):
         return True, f"automated sender: {from_addr}"
+
+    # Only reply to emails that came through our send-email form (from askian@askian.net)
+    # or direct emails from personal/trusted domains.
+    # This blocks cold outreach and marketing spam entirely.
+    trusted_domains = ["gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk",
+                       "hotmail.com", "hotmail.co.uk", "outlook.com", "icloud.com",
+                       "me.com", "mac.com", "btinternet.com", "sky.com",
+                       "virginmedia.com", "talktalk.net", "aol.com", "live.com",
+                       "msn.com", "protonmail.com", "pm.me"]
+    sender_domain = from_addr.split("@")[-1] if "@" in from_addr else ""
+    came_via_form = "askian@askian.net" in from_addr
+    is_trusted = sender_domain in trusted_domains
+    if not came_via_form and not is_trusted:
+        return True, f"untrusted sender domain: {sender_domain}"
 
     # Skip if we already replied to this message
     if message_id and message_id in state.get("replied_ids", []):
