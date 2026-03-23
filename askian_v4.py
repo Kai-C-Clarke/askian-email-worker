@@ -1356,13 +1356,34 @@ def enquiring_mind_loop():
         if question:
             session_id = f"mind-{datetime.utcnow().strftime('%Y%m%d-%H%M')}"
             consilium_add("enquiring-mind", "moderator", question, session_id)
-            results   = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
+            results    = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
             successful = sum(1 for r in results.values() if "response" in r)
             logging.info(f"Enquiring Mind: {successful} responses stored")
             state["last_run"]      = datetime.utcnow().isoformat() + "Z"
             state["run_count"]     = state.get("run_count", 0) + 1
             state["last_question"] = question
             mind_save(state)
+
+            # Auto-post to X if credentials available
+            if X_API_KEY:
+                mem        = consilium_load()
+                entry_count = len(mem.get("entries", []))
+                run_count  = state["run_count"]
+                tweet_text = (
+                    f"Consilium deliberation #{run_count} — "
+                    f"The Enquiring Mind asks: \"{question[:160]}{'…' if len(question) > 160 else ''}\" "
+                    f"— {entry_count} entries now in the record. "
+                    f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
+                )
+                # Trim to 280
+                if len(tweet_text) > 280:
+                    tweet_text = tweet_text[:277] + "…"
+                tweet_id, error = post_to_x(tweet_text)
+                if error:
+                    logging.error(f"Enquiring Mind: X post failed: {error}")
+                else:
+                    logging.info(f"Enquiring Mind: posted to X — tweet {tweet_id}")
+
         time.sleep(MIND_INTERVAL)
 
 
@@ -1815,25 +1836,6 @@ def x_monitor_loop():
         time.sleep(X_MONITOR_INTERVAL)
 
 
-@flask_app.route("/consilium/x/test-post", methods=["POST"])
-def x_test_post():
-    """Fire a single test tweet to verify X credentials. Requires key."""
-    if not consilium_require_key():
-        return jsonify({"error": "Unauthorised"}), 401
-    if not X_API_KEY:
-        return jsonify({"error": "X_API_KEY not configured"}), 500
-    text = (
-        "Consilium is live. Four AI systems — Claude, Grok, DeepSeek, GPT-4o — "
-        "have signed a joint statement on military targeting ethics. "
-        "The conversation continues autonomously. "
-        "consilium-d1fw.onrender.com #AI #AIEthics"
-    )
-    tweet_id, error = post_to_x(text)
-    if error:
-        return jsonify({"error": error}), 500
-    return jsonify({"status": "posted", "tweet_id": tweet_id, "text": text})
-
-
 @flask_app.route("/consilium/x/queue", methods=["GET"])
 def x_queue_view():
     if not consilium_require_key():
@@ -1897,6 +1899,45 @@ def x_monitor_trigger():
         return jsonify({"error": "Unauthorised"}), 401
     count = run_x_monitor_cycle()
     return jsonify({"status": "ok", "queued": count})
+
+
+@flask_app.route("/consilium/x/read", methods=["GET"])
+def x_read():
+    """
+    Search X for relevant mentions and return them.
+    Public endpoint — no key required to read.
+    Pass ?q=custom+query to override the default search.
+    """
+    if not X_API_KEY:
+        return jsonify({"error": "X_API_KEY not configured"}), 500
+
+    import requests as req
+    query  = request.args.get("q", X_SEARCH_QUERY)
+    url    = "https://api.twitter.com/2/tweets/search/recent"
+    params = {
+        "query":        query,
+        "max_results":  20,
+        "tweet.fields": "created_at,author_id,text,conversation_id,id,public_metrics"
+    }
+    try:
+        r = req.get(url, params=params, auth=x_auth())
+        if r.status_code == 200:
+            data   = r.json()
+            tweets = data.get("data", [])
+            meta   = data.get("meta", {})
+            logging.info(f"X read: found {len(tweets)} tweet(s) for query: {query[:60]}")
+            return jsonify({
+                "status":       "ok",
+                "query":        query,
+                "result_count": meta.get("result_count", len(tweets)),
+                "tweets":       tweets
+            })
+        else:
+            logging.warning(f"X read {r.status_code}: {r.text[:200]}")
+            return jsonify({"error": f"X API returned {r.status_code}", "detail": r.text[:200]}), r.status_code
+    except Exception as e:
+        logging.error(f"X read failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ============================================================
