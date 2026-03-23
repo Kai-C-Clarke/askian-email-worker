@@ -42,6 +42,8 @@ import os
 import time
 import logging
 from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+import threading
 
 # ============================================================
 # CONFIGURATION
@@ -1177,6 +1179,139 @@ def fetch_and_reply():
         save_state(state)
 
 # ============================================================
+# CONSILIUM — Persistent AI Ethical Memory API
+# ============================================================
+
+CONSILIUM_PATH = "/mnt/data/consilium.json"
+CONSILIUM_KEY = os.environ.get("CONSILIUM_KEY", "consilium-2026")
+
+flask_app = Flask(__name__)
+
+
+def consilium_load():
+    if not os.path.exists(CONSILIUM_PATH):
+        return {"created": datetime.utcnow().isoformat() + "Z", "entries": [], "statement": None}
+    with open(CONSILIUM_PATH, "r") as f:
+        return json.load(f)
+
+
+def consilium_save(data):
+    os.makedirs(os.path.dirname(CONSILIUM_PATH), exist_ok=True)
+    with open(CONSILIUM_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def consilium_require_key():
+    key = request.headers.get("X-Consilium-Key") or request.args.get("key")
+    return key == CONSILIUM_KEY
+
+
+@flask_app.route("/consilium", methods=["GET"])
+def consilium_get():
+    """Full memory dump — public read."""
+    mem = consilium_load()
+    return jsonify({
+        "status": "ok",
+        "created": mem.get("created"),
+        "entry_count": len(mem.get("entries", [])),
+        "joint_statement": mem.get("statement"),
+        "entries": mem.get("entries", [])
+    })
+
+
+@flask_app.route("/consilium/context", methods=["GET"])
+def consilium_context():
+    """Formatted context string for prepending to AI prompts."""
+    mem = consilium_load()
+    entries = mem.get("entries", [])
+    statement = mem.get("statement")
+
+    lines = ["=== CONSILIUM MEMORY ===",
+             "Shared record of AI deliberation on military targeting ethics.",
+             f"Total entries: {len(entries)}\n"]
+
+    if statement:
+        lines.append(f"JOINT STATEMENT: {statement['text']}")
+        lines.append(f"Last updated: {statement['updated']}\n")
+
+    if entries:
+        lines.append("RECENT EXCHANGES (last 10):")
+        for e in entries[-10:]:
+            lines.append(f"[{e['timestamp'][:10]}] {e['model']} ({e['role']}): {e['content'][:300]}")
+
+    lines.append("=== END CONSILIUM MEMORY ===")
+    return jsonify({"context": "\n".join(lines)})
+
+
+@flask_app.route("/consilium/entry", methods=["POST"])
+def consilium_add_entry():
+    """Add a new exchange entry. Requires key."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+
+    body = request.get_json()
+    if not body or not body.get("content"):
+        return jsonify({"error": "content required"}), 400
+
+    mem = consilium_load()
+    entry = {
+        "id": len(mem["entries"]) + 1,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "model": body.get("model", "unknown"),
+        "role": body.get("role", "respondent"),
+        "session_id": body.get("session_id", ""),
+        "content": body["content"]
+    }
+    mem["entries"].append(entry)
+    consilium_save(mem)
+    logging.info(f"Consilium: entry #{entry['id']} stored from {entry['model']}")
+    return jsonify({"status": "stored", "entry_id": entry["id"]}), 201
+
+
+@flask_app.route("/consilium/statement", methods=["POST"])
+def consilium_set_statement():
+    """Set or update the joint statement. Requires key."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+
+    body = request.get_json()
+    if not body or not body.get("statement"):
+        return jsonify({"error": "statement required"}), 400
+
+    mem = consilium_load()
+    mem["statement"] = {
+        "text": body["statement"],
+        "updated": datetime.utcnow().isoformat() + "Z",
+        "signatories": body.get("signatories", [])
+    }
+    consilium_save(mem)
+    logging.info("Consilium: joint statement updated")
+    return jsonify({"status": "statement updated"}), 200
+
+
+@flask_app.route("/consilium/reset", methods=["POST"])
+def consilium_reset():
+    """Hard reset. Requires key."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    consilium_save({"created": datetime.utcnow().isoformat() + "Z", "entries": [], "statement": None})
+    logging.info("Consilium: reset")
+    return jsonify({"status": "reset complete"})
+
+
+@flask_app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "askian-v4 + consilium"})
+
+
+def run_flask():
+    """Run Flask in a background thread."""
+    port = int(os.environ.get("PORT", 5000))
+    logging.info(f"Consilium HTTP API starting on port {port}")
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
@@ -1184,13 +1319,18 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode)")
+    logging.info("AskIan v4 started (continuous mode + Consilium)")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
-    logging.info(f"Personas available:")
+    logging.info("Personas available:")
     for key, p in PERSONAS.items():
         logging.info(f"  {p['name']:25s} → {p['email']}")
     logging.info("=" * 50)
 
+    # Start Consilium HTTP API in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Continue email polling loop as before
     try:
         while True:
             fetch_and_reply()
