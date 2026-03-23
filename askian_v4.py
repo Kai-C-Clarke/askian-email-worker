@@ -43,8 +43,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
-import threading
-from flask import Flask, request, jsonify
+from requests_oauthlib import OAuth1
 import threading
 
 # ============================================================
@@ -1652,6 +1651,255 @@ def run_flask():
 
 
 # ============================================================
+# CONSILIUM X MONITOR
+# ============================================================
+
+X_API_KEY             = os.environ.get("X_API_KEY", "")
+X_API_SECRET          = os.environ.get("X_API_SECRET", "")
+X_ACCESS_TOKEN        = os.environ.get("X_ACCESS_TOKEN", "")
+X_ACCESS_TOKEN_SECRET = os.environ.get("X_ACCESS_TOKEN_SECRET", "")
+
+X_QUEUE_PATH          = "/mnt/data/consilium_x_queue.json"
+X_POSTED_PATH         = "/mnt/data/consilium_x_posted.json"
+X_MONITOR_INTERVAL    = int(os.environ.get("X_MONITOR_INTERVAL", 1800))
+
+X_SEARCH_QUERY = (
+    '(consilium-d1fw OR "Consilium AI" OR '
+    '"military targeting ethics" OR "AI lethal targeting") '
+    '-from:ConsiliumAI -is:retweet'
+)
+
+
+def x_queue_load():
+    if not os.path.exists(X_QUEUE_PATH):
+        return {"pending": [], "processed": []}
+    with open(X_QUEUE_PATH, "r") as f:
+        return json.load(f)
+
+def x_queue_save(data):
+    with open(X_QUEUE_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def x_posted_load():
+    if not os.path.exists(X_POSTED_PATH):
+        return {"ids": []}
+    with open(X_POSTED_PATH, "r") as f:
+        return json.load(f)
+
+def x_posted_save(data):
+    with open(X_POSTED_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def already_seen(tweet_id):
+    posted = x_posted_load()
+    queue  = x_queue_load()
+    all_ids = (posted["ids"]
+               + [e["tweet_id"] for e in queue["pending"]]
+               + [e["tweet_id"] for e in queue["processed"]])
+    return tweet_id in all_ids
+
+def mark_seen(tweet_id):
+    posted = x_posted_load()
+    if tweet_id not in posted["ids"]:
+        posted["ids"].append(tweet_id)
+    x_posted_save(posted)
+
+def x_auth():
+    return OAuth1(X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET)
+
+def post_to_x(text, in_reply_to_tweet_id=None):
+    import requests as req
+    url     = "https://api.twitter.com/2/tweets"
+    payload = {"text": text}
+    if in_reply_to_tweet_id:
+        payload["reply"] = {"in_reply_to_tweet_id": str(in_reply_to_tweet_id)}
+    try:
+        r = req.post(url, json=payload, auth=x_auth())
+        r.raise_for_status()
+        tweet_id = r.json()["data"]["id"]
+        logging.info(f"X: posted tweet {tweet_id}")
+        return tweet_id, None
+    except Exception as e:
+        logging.error(f"X: post failed: {e}")
+        return None, str(e)
+
+def search_x_mentions():
+    import requests as req
+    url    = "https://api.twitter.com/2/tweets/search/recent"
+    params = {
+        "query":        X_SEARCH_QUERY,
+        "max_results":  10,
+        "tweet.fields": "created_at,author_id,text,conversation_id,id"
+    }
+    try:
+        r = req.get(url, params=params, auth=x_auth())
+        if r.status_code == 200:
+            tweets = r.json().get("data", [])
+            logging.info(f"X monitor: found {len(tweets)} tweet(s)")
+            return tweets
+        else:
+            logging.warning(f"X search {r.status_code}: {r.text[:200]}")
+            return []
+    except Exception as e:
+        logging.error(f"X search failed: {e}")
+        return []
+
+def generate_x_reply(tweet_text):
+    import requests as req
+    context = consilium_context_string()
+    prompt  = (
+        f"{context}\n\n"
+        f"Someone posted this on X: \"{tweet_text}\"\n\n"
+        "You are responding on behalf of Consilium — the shared AI deliberation record. "
+        "Draft a thoughtful, concise reply that engages genuinely with what they said, "
+        "draws on the joint statement or recent deliberation where relevant, "
+        "and is under 240 characters (a link will be appended). "
+        "Do not start with 'I'. Sound considered and calm, not like marketing.\n\n"
+        "Reply text only. No quotes, no preamble."
+    )
+    cfg     = CONSILIUM_MODELS["claude"]
+    headers = {"Content-Type": "application/json",
+               "x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
+    payload = {"model": cfg["model"], "max_tokens": 120,
+               "messages": [{"role": "user", "content": prompt}]}
+    try:
+        r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        reply = r.json()["content"][0]["text"].strip()
+        if len(reply) > 240:
+            reply = reply[:237] + "…"
+        reply += " consilium-d1fw.onrender.com"
+        return reply
+    except Exception as e:
+        logging.error(f"X reply generation failed: {e}")
+        return None
+
+def run_x_monitor_cycle():
+    tweets = search_x_mentions()
+    queued = 0
+    queue  = x_queue_load()
+    for tweet in tweets:
+        tweet_id = tweet["id"]
+        if already_seen(tweet_id):
+            continue
+        mark_seen(tweet_id)
+        text  = tweet.get("text", "")
+        draft = generate_x_reply(text)
+        if draft:
+            queue["pending"].append({
+                "id":          tweet_id,
+                "tweet_id":    tweet_id,
+                "tweet_text":  text,
+                "draft_reply": draft,
+                "created":     datetime.utcnow().isoformat() + "Z",
+                "status":      "pending"
+            })
+            queued += 1
+            logging.info(f"X monitor: queued reply for tweet {tweet_id}")
+    x_queue_save(queue)
+    return queued
+
+def x_monitor_loop():
+    logging.info(f"X Monitor started — interval {X_MONITOR_INTERVAL}s")
+    time.sleep(120)
+    while True:
+        if not X_API_KEY:
+            logging.warning("X Monitor: no X_API_KEY configured, sleeping")
+        else:
+            try:
+                count = run_x_monitor_cycle()
+                if count:
+                    logging.info(f"X Monitor: {count} reply draft(s) queued")
+            except Exception as e:
+                logging.error(f"X Monitor error: {e}")
+        time.sleep(X_MONITOR_INTERVAL)
+
+
+@flask_app.route("/consilium/x/test-post", methods=["POST"])
+def x_test_post():
+    """Fire a single test tweet to verify X credentials. Requires key."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    if not X_API_KEY:
+        return jsonify({"error": "X_API_KEY not configured"}), 500
+    text = (
+        "Consilium is live. Four AI systems — Claude, Grok, DeepSeek, GPT-4o — "
+        "have signed a joint statement on military targeting ethics. "
+        "The conversation continues autonomously. "
+        "consilium-d1fw.onrender.com #AI #AIEthics"
+    )
+    tweet_id, error = post_to_x(text)
+    if error:
+        return jsonify({"error": error}), 500
+    return jsonify({"status": "posted", "tweet_id": tweet_id, "text": text})
+
+
+@flask_app.route("/consilium/x/queue", methods=["GET"])
+def x_queue_view():
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    queue = x_queue_load()
+    return jsonify({"pending": queue.get("pending", []),
+                    "processed": queue.get("processed", [])[-10:]})
+
+@flask_app.route("/consilium/x/approve/<tweet_id>", methods=["POST"])
+def x_approve(tweet_id):
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    queue   = x_queue_load()
+    pending = queue.get("pending", [])
+    item    = next((p for p in pending if p["tweet_id"] == tweet_id), None)
+    if not item:
+        return jsonify({"error": "Not found in queue"}), 404
+    body    = request.get_json() or {}
+    text    = body.get("text", item["draft_reply"])
+    posted_id, error = post_to_x(text, in_reply_to_tweet_id=tweet_id)
+    if error:
+        return jsonify({"error": error}), 500
+    item["status"]    = "approved"
+    item["posted_id"] = posted_id
+    item["posted_at"] = datetime.utcnow().isoformat() + "Z"
+    queue["pending"]  = [p for p in pending if p["tweet_id"] != tweet_id]
+    queue.setdefault("processed", []).append(item)
+    x_queue_save(queue)
+    return jsonify({"status": "posted", "tweet_id": posted_id})
+
+@flask_app.route("/consilium/x/reject/<tweet_id>", methods=["POST"])
+def x_reject(tweet_id):
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    queue   = x_queue_load()
+    pending = queue.get("pending", [])
+    item    = next((p for p in pending if p["tweet_id"] == tweet_id), None)
+    if not item:
+        return jsonify({"error": "Not found in queue"}), 404
+    item["status"]   = "rejected"
+    queue["pending"] = [p for p in pending if p["tweet_id"] != tweet_id]
+    queue.setdefault("processed", []).append(item)
+    x_queue_save(queue)
+    return jsonify({"status": "rejected"})
+
+@flask_app.route("/consilium/x/post", methods=["POST"])
+def x_manual_post():
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    body = request.get_json()
+    if not body or not body.get("text"):
+        return jsonify({"error": "text required"}), 400
+    tweet_id, error = post_to_x(body["text"], body.get("reply_to"))
+    if error:
+        return jsonify({"error": error}), 500
+    return jsonify({"status": "posted", "tweet_id": tweet_id})
+
+@flask_app.route("/consilium/x/monitor", methods=["POST"])
+def x_monitor_trigger():
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    count = run_x_monitor_cycle()
+    return jsonify({"status": "ok", "queued": count})
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
@@ -1659,7 +1907,7 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind)")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + X Monitor)")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
@@ -1671,6 +1919,9 @@ if __name__ == "__main__":
 
     mind_thread = threading.Thread(target=enquiring_mind_loop, daemon=True)
     mind_thread.start()
+
+    x_monitor_thread = threading.Thread(target=x_monitor_loop, daemon=True)
+    x_monitor_thread.start()
 
     try:
         while True:
