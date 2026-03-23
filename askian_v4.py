@@ -1366,16 +1366,15 @@ def enquiring_mind_loop():
 
             # Auto-post to X if credentials available
             if X_API_KEY:
-                mem        = consilium_load()
+                mem         = consilium_load()
                 entry_count = len(mem.get("entries", []))
-                run_count  = state["run_count"]
-                tweet_text = (
+                run_count   = state["run_count"]
+                tweet_text  = (
                     f"Consilium deliberation #{run_count} — "
                     f"The Enquiring Mind asks: \"{question[:160]}{'…' if len(question) > 160 else ''}\" "
                     f"— {entry_count} entries now in the record. "
                     f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
                 )
-                # Trim to 280
                 if len(tweet_text) > 280:
                     tweet_text = tweet_text[:277] + "…"
                 tweet_id, error = post_to_x(tweet_text)
@@ -1905,12 +1904,10 @@ def x_monitor_trigger():
 def x_read():
     """
     Search X for relevant mentions and return them.
-    Public endpoint — no key required to read.
-    Pass ?q=custom+query to override the default search.
+    Public endpoint. Pass ?q=custom+query to override default search.
     """
     if not X_API_KEY:
         return jsonify({"error": "X_API_KEY not configured"}), 500
-
     import requests as req
     query  = request.args.get("q", X_SEARCH_QUERY)
     url    = "https://api.twitter.com/2/tweets/search/recent"
@@ -1925,19 +1922,112 @@ def x_read():
             data   = r.json()
             tweets = data.get("data", [])
             meta   = data.get("meta", {})
-            logging.info(f"X read: found {len(tweets)} tweet(s) for query: {query[:60]}")
-            return jsonify({
-                "status":       "ok",
-                "query":        query,
-                "result_count": meta.get("result_count", len(tweets)),
-                "tweets":       tweets
-            })
+            logging.info(f"X read: {len(tweets)} tweet(s)")
+            return jsonify({"status": "ok", "query": query,
+                            "result_count": meta.get("result_count", len(tweets)),
+                            "tweets": tweets})
         else:
-            logging.warning(f"X read {r.status_code}: {r.text[:200]}")
-            return jsonify({"error": f"X API returned {r.status_code}", "detail": r.text[:200]}), r.status_code
+            return jsonify({"error": f"X API {r.status_code}", "detail": r.text[:200]}), r.status_code
     except Exception as e:
         logging.error(f"X read failed: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/consilium/summary", methods=["GET"])
+def consilium_summary():
+    """
+    Generate a human-readable digest of Consilium activity.
+    Suitable for morning briefing, team update, or X post.
+    Public endpoint.
+    Format: ?format=text (default) | json | tweet
+    """
+    import requests as req
+    mem     = consilium_load()
+    mind    = mind_load()
+    entries = mem.get("entries", [])
+    stmt    = mem.get("statement")
+
+    entry_count  = len(entries)
+    run_count    = mind.get("run_count", 0)
+    last_q       = mind.get("last_question", "")
+    last_run     = mind.get("last_run", "")
+    signatories  = stmt.get("signatories", []) if stmt else []
+
+    # Recent respondent entries for summary
+    recent = [e for e in entries if e.get("role") == "respondent"][-4:]
+
+    fmt = request.args.get("format", "text")
+
+    # ── Tweet format (280 chars) ──────────────────────────────
+    if fmt == "tweet":
+        if last_q:
+            tweet = (
+                f"Consilium update — {entry_count} exchanges logged, "
+                f"{run_count} autonomous cycle{'s' if run_count != 1 else ''} completed.\n"
+                f"Latest question: \"{last_q[:120]}{'…' if len(last_q) > 120 else ''}\"\n"
+                f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
+            )
+        else:
+            tweet = (
+                f"Consilium: {entry_count} exchanges. "
+                f"Four AI systems deliberating autonomously on military targeting ethics. "
+                f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
+            )
+        if len(tweet) > 280:
+            tweet = tweet[:277] + "…"
+        return jsonify({"status": "ok", "tweet": tweet, "length": len(tweet)})
+
+    # ── JSON format ───────────────────────────────────────────
+    if fmt == "json":
+        return jsonify({
+            "status":       "ok",
+            "entry_count":  entry_count,
+            "mind_cycles":  run_count,
+            "signatories":  signatories,
+            "last_run":     last_run,
+            "last_question": last_q,
+            "recent_entries": recent,
+            "url":          "https://consilium-d1fw.onrender.com"
+        })
+
+    # ── Text format (default) — Claude-generated digest ──────
+    context = consilium_context_string()
+    prompt  = (
+        f"{context}\n\n"
+        f"Write a concise daily digest of Consilium activity suitable for three audiences:\n"
+        f"1. Jon Stiles (the builder) — his morning briefing\n"
+        f"2. The AI team (researchers/developers interested in alignment)\n"
+        f"3. A general X/Twitter audience interested in AI ethics\n\n"
+        f"Current stats: {entry_count} total entries, {run_count} autonomous Mind cycles, "
+        f"founded 23 March 2026.\n\n"
+        f"Format the digest in three clearly labelled sections. "
+        f"Be factual, specific, and concise. Reference actual questions asked and positions taken. "
+        f"No hype. No marketing language. Max 400 words total."
+    )
+    cfg     = CONSILIUM_MODELS["claude"]
+    headers = {"Content-Type": "application/json",
+               "x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
+    payload = {"model": cfg["model"], "max_tokens": 600,
+               "messages": [{"role": "user", "content": prompt}]}
+    try:
+        r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        digest = r.json()["content"][0]["text"].strip()
+        logging.info("Consilium summary generated")
+        return jsonify({
+            "status":      "ok",
+            "entry_count": entry_count,
+            "mind_cycles": run_count,
+            "last_run":    last_run,
+            "digest":      digest,
+            "url":         "https://consilium-d1fw.onrender.com"
+        })
+    except Exception as e:
+        logging.error(f"Summary generation failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 
 # ============================================================
