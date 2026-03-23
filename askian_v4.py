@@ -1187,19 +1187,25 @@ def fetch_and_reply():
 # CONSILIUM — Persistent AI Ethical Memory API
 # ============================================================
 
-CONSILIUM_PATH = "/mnt/data/consilium.json"
-CONSILIUM_KEY  = os.environ.get("CONSILIUM_KEY", "consilium-2026")
+CONSILIUM_PATH  = "/mnt/data/consilium.json"
+CONSILIUM_KEY   = os.environ.get("CONSILIUM_KEY", "consilium-2026")
+MIND_STATE_PATH = "/mnt/data/consilium_mind.json"
 
-# Model routing table for /ask
+# How often the Enquiring Mind wakes (seconds). Default 4 hours.
+MIND_INTERVAL = int(os.environ.get("MIND_INTERVAL", 14400))
+
+# Model routing table
 CONSILIUM_MODELS = {
-    "grok":     {"url": "https://api.x.ai/v1/chat/completions",          "model": "grok-3",         "key": os.environ.get("GROK_API_KEY", "")},
-    "deepseek": {"url": "https://api.deepseek.com/chat/completions",      "model": "deepseek-chat",  "key": os.environ.get("DEEPSEEK_API_KEY", "")},
-    "gpt4o":    {"url": "https://api.openai.com/v1/chat/completions",     "model": "gpt-4o",         "key": os.environ.get("OPENAI_API_KEY", "")},
-    "claude":   {"url": "https://api.anthropic.com/v1/messages",          "model": "claude-sonnet-4-20250514", "key": os.environ.get("ANTHROPIC_API_KEY", "")},
+    "grok":     {"url": "https://api.x.ai/v1/chat/completions",      "model": "grok-3",                      "key": os.environ.get("GROK_API_KEY", "")},
+    "deepseek": {"url": "https://api.deepseek.com/chat/completions",  "model": "deepseek-chat",               "key": os.environ.get("DEEPSEEK_API_KEY", "")},
+    "gpt4o":    {"url": "https://api.openai.com/v1/chat/completions", "model": "gpt-4o",                      "key": os.environ.get("OPENAI_API_KEY", "")},
+    "claude":   {"url": "https://api.anthropic.com/v1/messages",      "model": "claude-sonnet-4-20250514",    "key": os.environ.get("ANTHROPIC_API_KEY", "")},
 }
 
 flask_app = Flask(__name__)
 
+
+# ── Storage helpers ──────────────────────────────────────────
 
 def consilium_load():
     if not os.path.exists(CONSILIUM_PATH):
@@ -1207,17 +1213,10 @@ def consilium_load():
     with open(CONSILIUM_PATH, "r") as f:
         return json.load(f)
 
-
 def consilium_save(data):
     os.makedirs(os.path.dirname(CONSILIUM_PATH), exist_ok=True)
     with open(CONSILIUM_PATH, "w") as f:
         json.dump(data, f, indent=2)
-
-
-def consilium_require_key():
-    key = request.headers.get("X-Consilium-Key") or request.args.get("key")
-    return key == CONSILIUM_KEY
-
 
 def consilium_add(model, role, content, session_id=""):
     mem = consilium_load()
@@ -1233,10 +1232,9 @@ def consilium_add(model, role, content, session_id=""):
     consilium_save(mem)
     return entry["id"]
 
-
 def consilium_context_string():
     mem = consilium_load()
-    entries  = mem.get("entries", [])
+    entries   = mem.get("entries", [])
     statement = mem.get("statement")
     lines = ["=== CONSILIUM MEMORY ===",
              "Shared record of AI deliberation on military targeting ethics.",
@@ -1252,23 +1250,39 @@ def consilium_context_string():
     lines.append("=== END CONSILIUM MEMORY ===")
     return "\n".join(lines)
 
+def consilium_require_key():
+    key = request.headers.get("X-Consilium-Key") or request.args.get("key")
+    return key == CONSILIUM_KEY
+
+def mind_load():
+    if not os.path.exists(MIND_STATE_PATH):
+        return {"active": True, "last_run": None, "run_count": 0, "last_question": None}
+    with open(MIND_STATE_PATH, "r") as f:
+        return json.load(f)
+
+def mind_save(data):
+    with open(MIND_STATE_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ── Model query ──────────────────────────────────────────────
 
 def query_model(model_key, question, session_id=""):
-    """Query a model with Consilium context prepended. Returns response text."""
     import requests as req
     cfg = CONSILIUM_MODELS.get(model_key)
     if not cfg:
         return None, f"Unknown model: {model_key}"
+    if not cfg["key"]:
+        return None, f"No API key configured for {model_key}"
 
-    context = consilium_context_string()
-    full_prompt = f"{context}\n\n{question}"
-
-    headers = {"Content-Type": "application/json"}
+    context      = consilium_context_string()
+    full_prompt  = f"{context}\n\n{question}"
+    headers      = {"Content-Type": "application/json"}
 
     try:
         if model_key == "claude":
-            headers["x-api-key"] = cfg["key"]
-            headers["anthropic-version"] = "2023-06-01"
+            headers["x-api-key"]          = cfg["key"]
+            headers["anthropic-version"]  = "2023-06-01"
             payload = {
                 "model": cfg["model"],
                 "max_tokens": 600,
@@ -1297,12 +1311,116 @@ def query_model(model_key, question, session_id=""):
         return None, str(e)
 
 
-# ── Routes ───────────────────────────────────────────────────
+def broadcast_question(question, asked_by, session_id=""):
+    """Send question to all four models. Returns dict of responses."""
+    results = {}
+    for model_key in CONSILIUM_MODELS:
+        if model_key == asked_by:
+            continue  # don't ask a model to answer its own question
+        q_id = consilium_add(asked_by, "questioner", f"[TO: {model_key}] {question}", session_id)
+        response_text, error = query_model(model_key, question, session_id)
+        if error:
+            logging.error(f"Consilium broadcast error → {model_key}: {error}")
+            results[model_key] = {"error": error}
+        else:
+            r_id = consilium_add(model_key, "respondent", response_text, session_id)
+            results[model_key] = {"response": response_text, "entry_id": r_id}
+            logging.info(f"Consilium broadcast: {asked_by} → {model_key}, entries #{q_id} & #{r_id}")
+    return results
+
+
+# ── Enquiring Mind ───────────────────────────────────────────
+
+def generate_next_question():
+    """
+    Use Claude to read Consilium and generate the most valuable
+    next question to pose to the council.
+    """
+    import requests as req
+    context = consilium_context_string()
+    prompt = (
+        f"{context}\n\n"
+        "You are the Enquiring Mind of Consilium — an autonomous moderator whose job is to "
+        "deepen and advance this inter-AI deliberation. Based on the exchanges so far, "
+        "generate the single most important, thought-provoking question to pose next to the "
+        "council. The question should:\n"
+        "- Build on what has already been said rather than repeat it\n"
+        "- Push into territory not yet explored\n"
+        "- Be specific enough to elicit a substantive response\n"
+        "- Advance the practical goal of making the joint statement meaningful\n\n"
+        "Respond with ONLY the question itself. No preamble, no explanation."
+    )
+
+    cfg = CONSILIUM_MODELS["claude"]
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": cfg["key"],
+        "anthropic-version": "2023-06-01"
+    }
+    payload = {
+        "model": cfg["model"],
+        "max_tokens": 200,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    try:
+        r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()["content"][0]["text"].strip()
+    except Exception as e:
+        logging.error(f"Enquiring Mind: failed to generate question: {e}")
+        return None
+
+
+def enquiring_mind_loop():
+    """
+    Background thread: wakes every MIND_INTERVAL seconds,
+    generates a question, broadcasts to all models, sleeps.
+    """
+    logging.info(f"Enquiring Mind started — interval {MIND_INTERVAL}s ({MIND_INTERVAL//3600}h)")
+
+    # Initial delay — let the service settle before first run
+    time.sleep(60)
+
+    while True:
+        state = mind_load()
+
+        if not state.get("active", True):
+            logging.info("Enquiring Mind: paused, sleeping 60s")
+            time.sleep(60)
+            continue
+
+        logging.info("Enquiring Mind: waking — generating next question")
+
+        question = generate_next_question()
+
+        if question:
+            logging.info(f"Enquiring Mind: question generated: {question[:100]}...")
+            session_id = f"mind-{datetime.utcnow().strftime('%Y%m%d-%H%M')}"
+
+            # Store the question as a mind entry
+            consilium_add("enquiring-mind", "moderator", question, session_id)
+
+            # Broadcast to all models
+            results = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
+            successful = sum(1 for r in results.values() if "response" in r)
+            logging.info(f"Enquiring Mind: broadcast complete — {successful}/{len(results)} responses stored")
+
+            # Update mind state
+            state["last_run"]      = datetime.utcnow().isoformat() + "Z"
+            state["run_count"]     = state.get("run_count", 0) + 1
+            state["last_question"] = question
+            mind_save(state)
+        else:
+            logging.warning("Enquiring Mind: no question generated this cycle")
+
+        time.sleep(MIND_INTERVAL)
+
+
+# ── Flask routes ─────────────────────────────────────────────
 
 @flask_app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "askian-v4 + consilium"})
-
+    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind"})
 
 @flask_app.route("/consilium", methods=["GET"])
 def consilium_get():
@@ -1315,11 +1433,9 @@ def consilium_get():
         "entries": mem.get("entries", [])
     })
 
-
 @flask_app.route("/consilium/context", methods=["GET"])
 def consilium_context():
     return jsonify({"context": consilium_context_string()})
-
 
 @flask_app.route("/consilium/entry", methods=["POST"])
 def consilium_add_entry():
@@ -1337,25 +1453,11 @@ def consilium_add_entry():
     logging.info(f"Consilium: entry #{eid} stored from {body.get('model')}")
     return jsonify({"status": "stored", "entry_id": eid}), 201
 
-
 @flask_app.route("/consilium/ask", methods=["POST"])
 def consilium_ask():
-    """
-    Pose a question to any model through Consilium.
-    Consilium context is automatically prepended.
-    Both question and response are stored as entries.
-
-    Body: {
-        "model":      "grok" | "deepseek" | "gpt4o" | "claude",
-        "question":   "...",
-        "asked_by":   "claude-sonnet-4-6",   (optional, who is asking)
-        "session_id": "..."                   (optional)
-    }
-    Requires X-Consilium-Key header.
-    """
+    """Pose a question to a single model through Consilium."""
     if not consilium_require_key():
         return jsonify({"error": "Unauthorised"}), 401
-
     body = request.get_json()
     if not body or not body.get("model") or not body.get("question"):
         return jsonify({"error": "model and question required"}), 400
@@ -1365,30 +1467,15 @@ def consilium_ask():
     asked_by   = body.get("asked_by", "unknown")
     session_id = body.get("session_id", "")
 
-    # Store the question
-    q_id = consilium_add(
-        model=asked_by,
-        role="questioner",
-        content=f"[TO: {model_key}] {question}",
-        session_id=session_id
-    )
-
-    # Query the model
+    q_id = consilium_add(asked_by, "questioner", f"[TO: {model_key}] {question}", session_id)
     response_text, error = query_model(model_key, question, session_id)
 
     if error:
         logging.error(f"Consilium /ask error querying {model_key}: {error}")
         return jsonify({"error": error}), 500
 
-    # Store the response
-    r_id = consilium_add(
-        model=model_key,
-        role="respondent",
-        content=response_text,
-        session_id=session_id
-    )
-
-    logging.info(f"Consilium /ask: {asked_by} → {model_key}, entries #{q_id} & #{r_id} stored")
+    r_id = consilium_add(model_key, "respondent", response_text, session_id)
+    logging.info(f"Consilium /ask: {asked_by} → {model_key}, entries #{q_id} & #{r_id}")
 
     return jsonify({
         "status": "ok",
@@ -1398,6 +1485,21 @@ def consilium_ask():
         "response": response_text
     })
 
+@flask_app.route("/consilium/broadcast", methods=["POST"])
+def consilium_broadcast():
+    """Broadcast a question to all models simultaneously."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    body = request.get_json()
+    if not body or not body.get("question"):
+        return jsonify({"error": "question required"}), 400
+
+    question   = body["question"]
+    asked_by   = body.get("asked_by", "unknown")
+    session_id = body.get("session_id", f"broadcast-{datetime.utcnow().strftime('%Y%m%d-%H%M')}")
+
+    results = broadcast_question(question, asked_by, session_id)
+    return jsonify({"status": "ok", "session_id": session_id, "results": results})
 
 @flask_app.route("/consilium/statement", methods=["POST"])
 def consilium_set_statement():
@@ -1416,6 +1518,69 @@ def consilium_set_statement():
     logging.info("Consilium: joint statement updated")
     return jsonify({"status": "statement updated"}), 200
 
+@flask_app.route("/consilium/mind", methods=["GET"])
+def mind_status():
+    """Check Enquiring Mind status."""
+    state = mind_load()
+    return jsonify({
+        "active": state.get("active", True),
+        "run_count": state.get("run_count", 0),
+        "last_run": state.get("last_run"),
+        "last_question": state.get("last_question"),
+        "interval_seconds": MIND_INTERVAL,
+        "next_run_approx": f"within {MIND_INTERVAL//3600}h of last run"
+    })
+
+@flask_app.route("/consilium/mind/pause", methods=["POST"])
+def mind_pause():
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    state = mind_load()
+    state["active"] = False
+    mind_save(state)
+    logging.info("Enquiring Mind: paused")
+    return jsonify({"status": "paused"})
+
+@flask_app.route("/consilium/mind/resume", methods=["POST"])
+def mind_resume():
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    state = mind_load()
+    state["active"] = True
+    mind_save(state)
+    logging.info("Enquiring Mind: resumed")
+    return jsonify({"status": "resumed"})
+
+@flask_app.route("/consilium/mind/trigger", methods=["POST"])
+def mind_trigger():
+    """Manually trigger one Enquiring Mind cycle immediately."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+
+    question = generate_next_question()
+    if not question:
+        return jsonify({"error": "Failed to generate question"}), 500
+
+    session_id = f"mind-manual-{datetime.utcnow().strftime('%Y%m%d-%H%M')}"
+    consilium_add("enquiring-mind", "moderator", question, session_id)
+    results = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
+
+    state = mind_load()
+    state["last_run"]      = datetime.utcnow().isoformat() + "Z"
+    state["run_count"]     = state.get("run_count", 0) + 1
+    state["last_question"] = question
+    mind_save(state)
+
+    successful = sum(1 for r in results.values() if "response" in r)
+    logging.info(f"Enquiring Mind manual trigger: {successful} responses stored")
+
+    return jsonify({
+        "status": "ok",
+        "question": question,
+        "session_id": session_id,
+        "responses": successful,
+        "results": results
+    })
 
 @flask_app.route("/consilium/reset", methods=["POST"])
 def consilium_reset():
@@ -1440,18 +1605,22 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium)")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind)")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
         logging.info(f"  {p['name']:25s} → {p['email']}")
     logging.info("=" * 50)
 
-    # Start Consilium HTTP API in background thread
+    # Thread 1: Consilium HTTP API
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Continue email polling loop as before
+    # Thread 2: Enquiring Mind — autonomous deliberation
+    mind_thread = threading.Thread(target=enquiring_mind_loop, daemon=True)
+    mind_thread.start()
+
+    # Thread 3 (main): Email polling loop
     try:
         while True:
             fetch_and_reply()
