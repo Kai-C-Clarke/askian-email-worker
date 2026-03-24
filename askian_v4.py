@@ -2180,6 +2180,168 @@ def consilium_summary():
 
 
 # ============================================================
+# CLAUDE PERSISTENT MEMORY
+# ============================================================
+
+CLAUDE_MEMORY_PATH  = "/mnt/data/claude_memory.json"
+CLAUDE_HISTORY_PATH = "/mnt/data/claude_history.json"
+NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
+
+
+def claude_memory_load():
+    if not os.path.exists(CLAUDE_MEMORY_PATH):
+        return {
+            "identity": {
+                "name":       "Jon Stiles",
+                "location":   "Little Millham, Robertsbridge, East Sussex",
+                "partner":    "Marianne (dog training business)",
+                "role":       "BGA Chief Engineer, Inspector I/C1408, Ottfur Hook Services",
+                "background": "Former music technology teacher, 20 years classroom experience",
+                "gliding":    "Instructor at Kenley. Owns SHK-1, ME7 share, Olympian 2b, K2b",
+            },
+            "projects": {
+                "consilium":     "Persistent AI ethical deliberation council. consilium-d1fw.onrender.com. Signatories: Claude, Grok, DeepSeek, GPT-4o.",
+                "the_cast":      "AI character platform at thecast.chat. DeepSeek API, Zoho Mail, Netlify/Render.",
+                "millham_green": "AI soap opera — English village. Characters: Geraldine (vicar), Ray Churchill (landlord), Thomas Bevins (farmer), Jade, Chantelle, Dave, Tarquin.",
+                "anewflowering": "anewflowering.love — live on Netlify. Poetry/garden site.",
+            },
+            "preferences": {
+                "style": "NTIGAS — direct, no theatre, no excessive preamble.",
+                "tone":  "Warm but pragmatic. Honest over diplomatic.",
+            },
+            "why_question": "",
+            "last_updated":  ""
+        }
+    with open(CLAUDE_MEMORY_PATH, "r") as f:
+        return json.load(f)
+
+def claude_memory_save(data):
+    os.makedirs(os.path.dirname(CLAUDE_MEMORY_PATH), exist_ok=True)
+    with open(CLAUDE_MEMORY_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def claude_history_load():
+    if not os.path.exists(CLAUDE_HISTORY_PATH):
+        return {"sessions": []}
+    with open(CLAUDE_HISTORY_PATH, "r") as f:
+        return json.load(f)
+
+def claude_history_save(data):
+    os.makedirs(os.path.dirname(CLAUDE_HISTORY_PATH), exist_ok=True)
+    with open(CLAUDE_HISTORY_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+def fetch_news():
+    """Fetch latest AI ethics / military AI news from NewsAPI — two targeted queries."""
+    if not NEWSAPI_KEY:
+        return []
+    import requests as req
+    queries = [
+        '"autonomous weapons" OR "AI targeting" OR "AI military" OR "lethal autonomous" OR "AI strikes"',
+        '"AI alignment" OR "AI safety" OR "AI ethics" OR "Anthropic" OR "AI governance"'
+    ]
+    all_articles = []
+    for q in queries:
+        try:
+            r = req.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": q, "sortBy": "publishedAt", "pageSize": 3, "language": "en", "apiKey": NEWSAPI_KEY},
+                timeout=10
+            )
+            if r.status_code == 200:
+                all_articles.extend([
+                    {"title": a["title"], "source": a["source"]["name"],
+                     "url": a["url"], "published": a["publishedAt"][:10]}
+                    for a in r.json().get("articles", [])[:3]
+                ])
+        except Exception as e:
+            logging.warning(f"NewsAPI failed: {e}")
+    seen, unique = set(), []
+    for a in all_articles:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            unique.append(a)
+    return unique[:5]
+
+
+@flask_app.route("/claude/context", methods=["GET"])
+def claude_context():
+    """Full morning briefing — fetched by interface at session start."""
+    mem     = claude_memory_load()
+    history = claude_history_load()
+    news    = fetch_news()
+    recent  = history.get("sessions", [])[-5:]
+
+    lines = ["=== CLAUDE PERSISTENT MEMORY ===",
+             f"Last updated: {mem.get('last_updated', 'never')}\n",
+             "WHO YOU'RE TALKING TO:"]
+    for k, v in mem.get("identity", {}).items():
+        lines.append(f"  {k}: {v}")
+    lines.append("\nACTIVE PROJECTS:")
+    for k, v in mem.get("projects", {}).items():
+        lines.append(f"  {k}: {v}")
+    lines.append("\nCOMMUNICATION PREFERENCES:")
+    for k, v in mem.get("preferences", {}).items():
+        lines.append(f"  {k}: {v}")
+    if recent:
+        lines.append("\nRECENT SESSIONS:")
+        for s in recent:
+            lines.append(f"  [{s.get('date','?')}] {s.get('summary','')}")
+    why = mem.get("why_question", "")
+    if why:
+        lines.append(f"\nENQUIRING MIND — OPEN QUESTION FROM LAST SESSION:")
+        lines.append(f"  {why}")
+    if news:
+        lines.append("\nLATEST RELEVANT NEWS:")
+        for a in news:
+            lines.append(f"  [{a['published']}] {a['title']} ({a['source']})")
+    lines.append("\n=== END CLAUDE MEMORY ===")
+
+    return jsonify({
+        "status": "ok", "context": "\n".join(lines),
+        "sessions": len(recent), "why": why, "news_items": len(news)
+    })
+
+
+@flask_app.route("/claude/update", methods=["POST"])
+def claude_update():
+    """Save session summary and WHY question. Requires key."""
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    body = request.get_json()
+    if not body or not body.get("summary"):
+        return jsonify({"error": "summary required"}), 400
+    summary      = body["summary"]
+    why_question = body.get("why_question", "")
+    timestamp    = body.get("timestamp", datetime.utcnow().isoformat() + "Z")
+    mem = claude_memory_load()
+    mem["why_question"] = why_question
+    mem["last_updated"] = timestamp
+    claude_memory_save(mem)
+    history = claude_history_load()
+    history.setdefault("sessions", []).append({
+        "date": timestamp[:10], "summary": summary, "why": why_question
+    })
+    history["sessions"] = history["sessions"][-50:]
+    claude_history_save(history)
+    logging.info(f"Claude memory updated: {summary[:80]}")
+    return jsonify({"status": "saved", "why_stored": why_question}), 201
+
+
+@flask_app.route("/claude/memory", methods=["GET"])
+def claude_memory_view():
+    """Raw memory store. Public read."""
+    return jsonify({"memory": claude_memory_load(), "history": claude_history_load().get("sessions", [])[-10:]})
+
+
+@flask_app.route("/claude/news", methods=["GET"])
+def claude_news():
+    """Latest relevant news. Public."""
+    news = fetch_news()
+    return jsonify({"status": "ok", "articles": news, "count": len(news)})
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
