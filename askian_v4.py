@@ -2341,6 +2341,47 @@ def claude_news():
     return jsonify({"status": "ok", "articles": news, "count": len(news)})
 
 
+@flask_app.route("/claude/chat", methods=["POST"])
+def claude_chat_proxy():
+    """
+    Proxy endpoint for Anthropic API calls from the browser.
+    Avoids CORS issues — browser calls this, we forward to Anthropic.
+    Body: { "messages": [...], "system": "..." }
+    """
+    import requests as req
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "Body required"}), 400
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not anthropic_key:
+        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 500
+
+    payload = {
+        "model":      "claude-sonnet-4-20250514",
+        "max_tokens": body.get("max_tokens", 1000),
+        "messages":   body.get("messages", []),
+    }
+    if body.get("system"):
+        payload["system"] = body["system"]
+
+    try:
+        r = req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         anthropic_key,
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        logging.error(f"Claude proxy error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ============================================================
 # ENTRY POINT
 # ============================================================
