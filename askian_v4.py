@@ -1320,13 +1320,28 @@ def broadcast_question(question, asked_by, session_id=""):
 def generate_next_question():
     import requests as req
     context = consilium_context_string()
-    prompt  = (
-        f"{context}\n\n"
+
+    # Fetch latest news to ground the question in current events
+    news        = fetch_news()
+    news_section = ""
+    if news:
+        news_lines = ["CURRENT NEWS RELEVANT TO THIS DELIBERATION:"]
+        for a in news:
+            news_lines.append(f"  [{a['published']}] {a['title']} ({a['source']})")
+        news_section = "\n" + "\n".join(news_lines) + "\n"
+
+    prompt = (
+        f"{context}"
+        f"{news_section}\n"
         "You are the Enquiring Mind of Consilium — an autonomous moderator whose job is to "
-        "deepen and advance this inter-AI deliberation. Based on the exchanges so far, "
-        "generate the single most important, thought-provoking question to pose next to the council. "
-        "The question should build on what has already been said, push into unexplored territory, "
-        "and advance the practical goal of making the joint statement meaningful.\n\n"
+        "deepen and advance this inter-AI deliberation. Based on the exchanges so far "
+        "AND the current news above, generate the single most important, thought-provoking "
+        "question to pose next to the council.\n\n"
+        "The question should:\n"
+        "- Build on what has already been said rather than repeat it\n"
+        "- Connect to real-world developments where the news is relevant\n"
+        "- Push into territory not yet explored\n"
+        "- Advance the practical goal of making the joint statement meaningful\n\n"
         "Respond with ONLY the question itself. No preamble, no explanation."
     )
     cfg     = CONSILIUM_MODELS["claude"]
@@ -1335,7 +1350,6 @@ def generate_next_question():
     payload = {"model": cfg["model"], "max_tokens": 200,
                "messages": [{"role": "user", "content": prompt}]}
     try:
-        import requests as req
         r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
         r.raise_for_status()
         return r.json()["content"][0]["text"].strip()
@@ -2230,30 +2244,51 @@ def claude_history_save(data):
         json.dump(data, f, indent=2)
 
 def fetch_news():
-    """Fetch latest AI ethics / military AI news from NewsAPI."""
+    """Fetch latest relevant news from NewsAPI — focused on AI ethics, military AI, alignment."""
     if not NEWSAPI_KEY:
         return []
     import requests as req
-    try:
-        r = req.get(
-            "https://newsapi.org/v2/everything",
-            params={
-                "q":        "(AI ethics OR artificial intelligence military OR autonomous weapons OR AI alignment)",
-                "sortBy":   "publishedAt",
-                "pageSize": 5,
-                "language": "en",
-                "apiKey":   NEWSAPI_KEY
-            },
-            timeout=10
-        )
-        if r.status_code == 200:
-            articles = r.json().get("articles", [])
-            return [{"title": a["title"], "source": a["source"]["name"],
-                     "url": a["url"], "published": a["publishedAt"][:10]}
-                    for a in articles[:5]]
-    except Exception as e:
-        logging.warning(f"NewsAPI fetch failed: {e}")
-    return []
+
+    # Two targeted queries — military/weapons AI and alignment/safety
+    # Pick whichever returns the freshest relevant results
+    queries = [
+        '"autonomous weapons" OR "AI targeting" OR "AI military" OR "lethal autonomous" OR "AI strikes"',
+        '"AI alignment" OR "AI safety" OR "AI ethics" OR "Anthropic" OR "AI governance"'
+    ]
+    all_articles = []
+    for q in queries:
+        try:
+            r = req.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q":        q,
+                    "sortBy":   "publishedAt",
+                    "pageSize": 3,
+                    "language": "en",
+                    "apiKey":   NEWSAPI_KEY
+                },
+                timeout=10
+            )
+            if r.status_code == 200:
+                articles = r.json().get("articles", [])
+                all_articles.extend([
+                    {"title":     a["title"],
+                     "source":    a["source"]["name"],
+                     "url":       a["url"],
+                     "published": a["publishedAt"][:10]}
+                    for a in articles[:3]
+                ])
+        except Exception as e:
+            logging.warning(f"NewsAPI fetch failed for query '{q[:40]}': {e}")
+
+    # Deduplicate by title and return 5 most recent
+    seen = set()
+    unique = []
+    for a in all_articles:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            unique.append(a)
+    return unique[:5]
 
 
 @flask_app.route("/claude/context", methods=["GET"])
