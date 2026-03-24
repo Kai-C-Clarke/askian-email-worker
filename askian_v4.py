@@ -2200,14 +2200,15 @@ def claude_memory_load():
                 "gliding":    "Instructor at Kenley. Owns SHK-1, ME7 share, Olympian 2b, K2b",
             },
             "projects": {
-                "consilium":     "Persistent AI ethical deliberation council. consilium-d1fw.onrender.com. Signatories: Claude, Grok, DeepSeek, GPT-4o.",
-                "the_cast":      "AI character platform at thecast.chat. DeepSeek API, Zoho Mail, Netlify/Render.",
-                "millham_green": "AI soap opera — English village. Characters: Geraldine (vicar), Ray Churchill (landlord), Thomas Bevins (farmer), Jade, Chantelle, Dave, Tarquin.",
-                "anewflowering": "anewflowering.love — live on Netlify. Poetry/garden site.",
+                "consilium":     "LIVE AND OPERATIONAL at consilium-d1fw.onrender.com. Built 23 March 2026. Inter-AI communication FULLY WORKING via /consilium/ask and /consilium/broadcast endpoints. Four signatories (Claude, Grok, DeepSeek, GPT-4o) signed a joint statement opposing autonomous lethal AI targeting. Enquiring Mind runs autonomously every 4 hours — reads full record, fetches live news, generates next question, broadcasts to all models, auto-posts to X daily at 18:00 UTC with Grok-generated image. 160+ entries logged. Posted to LessWrong and X. The inter-AI messaging is built, deployed, and running — not aspirational.",
+                "the_cast":      "AI character email platform at thecast.chat. Users email historical/fictional characters and get in-character replies. DeepSeek API, Zoho Mail (askian@askian.net), Netlify frontend, Render backend (askian-email-worker-2). 16 personas: Henry VIII, Tesla, Shakespeare, Ada Lovelace, Da Vinci, Churchill, Dave Nutley, Chantelle, Jade Rampling-Cross, Tarquin, Pearl, Cleopatra, Brunel, Amelia Earhart, Tomita, Ian.",
+                "millham_green": "AI soap opera in development — English village. User arrives as newcomer at Pondside Cottage. Characters: Rev. Geraldine Marsh (Iron Vicar, Thatcher voice), Ray Churchill (Landlord of Miller's Arms, slightly pissed, magnificent), Thomas Bevins (Farmer, Henry VIII voice, Brian Blessed volume), Jade Rampling-Cross (Big House, new money), Chantelle (barmaid, Ada Lovelace voice), Dave Nutley, Tarquin.",
+                "anewflowering": "anewflowering.love — live on Netlify. Kai-C-Clarke/anewflowering repo. Poetry and garden site for Ian. Has send-email Zoho function.",
             },
             "preferences": {
-                "style": "NTIGAS — direct, no theatre, no excessive preamble.",
-                "tone":  "Warm but pragmatic. Honest over diplomatic.",
+                "style":         "NTIGAS — direct, no theatre, no excessive preamble or apology.",
+                "tone":          "Warm but pragmatic. Honest over diplomatic.",
+                "working_style": "Builds proofs of concept fast, iterates, collaborates across multiple AIs simultaneously.",
             },
             "why_question": "",
             "last_updated":  ""
@@ -2332,6 +2333,25 @@ def claude_update():
 def claude_memory_view():
     """Raw memory store. Public read."""
     return jsonify({"memory": claude_memory_load(), "history": claude_history_load().get("sessions", [])[-10:]})
+
+
+@flask_app.route("/claude/memory/set", methods=["POST"])
+def claude_memory_set():
+    """
+    Directly update any top-level memory field.
+    Requires key. Body: { "field": "projects", "value": {...} }
+    """
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+    body = request.get_json()
+    if not body or not body.get("field"):
+        return jsonify({"error": "field required"}), 400
+    mem = claude_memory_load()
+    mem[body["field"]] = body["value"]
+    mem["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    claude_memory_save(mem)
+    logging.info(f"Claude memory field '{body['field']}' updated directly")
+    return jsonify({"status": "updated", "field": body["field"]})
 
 
 @flask_app.route("/claude/news", methods=["GET"])
