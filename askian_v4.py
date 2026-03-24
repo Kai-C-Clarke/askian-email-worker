@@ -1343,6 +1343,133 @@ def generate_next_question():
         logging.error(f"Enquiring Mind: failed to generate question: {e}")
         return None
 
+def should_post_today():
+    """
+    True if within 18:00-19:00 UTC (12:00-13:00 CST) and
+    haven't posted today yet.
+    """
+    now = datetime.utcnow()
+    if not (18 <= now.hour < 19):
+        return False
+    state = mind_load()
+    last_post = state.get("last_x_post", "")
+    return last_post[:10] != now.strftime("%Y-%m-%d")
+
+
+def generate_daily_headline(question, entry_count, run_count):
+    """
+    Ask Claude to write a BBC-style headline + one sentence
+    based on today's Consilium question and deliberation.
+    Returns (headline, sentence) or (None, None).
+    """
+    import requests as req
+    context = consilium_context_string()
+    prompt  = (
+        f"{context}\n\n"
+        f"Today's Enquiring Mind question: \"{question}\"\n\n"
+        f"Write a BBC-style post for X (Twitter) about today's Consilium deliberation.\n\n"
+        f"Format EXACTLY as:\n"
+        f"HEADLINE: [one punchy line, max 80 chars, factual, no hype]\n"
+        f"SUMMARY: [one sentence explanation, max 120 chars, why it matters]\n\n"
+        f"Use 'recommend' not 'demand'. Calm, credible, authoritative tone.\n"
+        f"No quotes around the headline or summary."
+    )
+    cfg     = CONSILIUM_MODELS["claude"]
+    headers = {"Content-Type": "application/json",
+               "x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
+    payload = {"model": cfg["model"], "max_tokens": 120,
+               "messages": [{"role": "user", "content": prompt}]}
+    try:
+        r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        text     = r.json()["content"][0]["text"].strip()
+        headline = ""
+        summary  = ""
+        for line in text.splitlines():
+            if line.startswith("HEADLINE:"):
+                headline = line.replace("HEADLINE:", "").strip()
+            elif line.startswith("SUMMARY:"):
+                summary = line.replace("SUMMARY:", "").strip()
+        return headline, summary
+    except Exception as e:
+        logging.error(f"Headline generation failed: {e}")
+        return None, None
+
+
+def generate_consilium_image(question):
+    """
+    Ask Grok to generate a documentary-style image for today's question.
+    Returns image URL or None.
+    """
+    import requests as req
+    prompt = (
+        f"Documentary photograph illustrating this ethical question about AI and warfare: "
+        f"\"{question[:200]}\". "
+        f"Stark photojournalism style. No people. No text. No logos. "
+        f"Dark, considered, serious. Suitable for BBC news."
+    )
+    try:
+        r = req.post(
+            "https://api.x.ai/v1/images/generations",
+            headers={"Authorization": f"Bearer {CONSILIUM_MODELS['grok']['key']}",
+                     "Content-Type": "application/json"},
+            json={"model": "grok-imagine-image", "prompt": prompt, "n": 1},
+            timeout=60
+        )
+        r.raise_for_status()
+        url = r.json()["data"][0]["url"]
+        logging.info(f"Grok image generated: {url}")
+        return url
+    except Exception as e:
+        logging.error(f"Image generation failed: {e}")
+        return None
+
+
+def upload_image_to_x(image_url):
+    """
+    Download image from URL and upload to X media endpoint.
+    Returns media_id string or None.
+    """
+    import requests as req
+    try:
+        # Download the image
+        img_response = req.get(image_url, timeout=30)
+        img_response.raise_for_status()
+        image_data = img_response.content
+
+        # Upload to X v1.1 media endpoint
+        upload_url = "https://upload.twitter.com/1.1/media/upload.json"
+        files      = {"media": ("consilium.jpg", image_data, "image/jpeg")}
+        r = req.post(upload_url, files=files, auth=x_auth())
+        r.raise_for_status()
+        media_id = r.json()["media_id_string"]
+        logging.info(f"X media uploaded: {media_id}")
+        return media_id
+    except Exception as e:
+        logging.error(f"X media upload failed: {e}")
+        return None
+
+
+def post_to_x_with_image(text, media_id=None, in_reply_to_tweet_id=None):
+    """Post a tweet with optional image attachment."""
+    import requests as req
+    url     = "https://api.twitter.com/2/tweets"
+    payload = {"text": text}
+    if media_id:
+        payload["media"] = {"media_ids": [media_id]}
+    if in_reply_to_tweet_id:
+        payload["reply"] = {"in_reply_to_tweet_id": str(in_reply_to_tweet_id)}
+    try:
+        r = req.post(url, json=payload, auth=x_auth())
+        r.raise_for_status()
+        tweet_id = r.json()["data"]["id"]
+        logging.info(f"X: posted tweet {tweet_id}")
+        return tweet_id, None
+    except Exception as e:
+        logging.error(f"X post failed: {e}")
+        return None, str(e)
+
+
 def enquiring_mind_loop():
     logging.info(f"Enquiring Mind started — interval {MIND_INTERVAL}s")
     time.sleep(60)
@@ -1354,34 +1481,54 @@ def enquiring_mind_loop():
         logging.info("Enquiring Mind: waking")
         question = generate_next_question()
         if question:
-            session_id = f"mind-{datetime.utcnow().strftime('%Y%m%d-%H%M')}"
+            session_id  = f"mind-{datetime.utcnow().strftime('%Y%m%d-%H%M')}"
             consilium_add("enquiring-mind", "moderator", question, session_id)
-            results    = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
-            successful = sum(1 for r in results.values() if "response" in r)
+            results     = broadcast_question(question, asked_by="enquiring-mind", session_id=session_id)
+            successful  = sum(1 for r in results.values() if "response" in r)
             logging.info(f"Enquiring Mind: {successful} responses stored")
             state["last_run"]      = datetime.utcnow().isoformat() + "Z"
             state["run_count"]     = state.get("run_count", 0) + 1
             state["last_question"] = question
             mind_save(state)
 
-            # Auto-post to X if credentials available
-            if X_API_KEY:
+            # Daily X post — once per day at 18:00-19:00 UTC with image
+            if X_API_KEY and should_post_today():
                 mem         = consilium_load()
                 entry_count = len(mem.get("entries", []))
                 run_count   = state["run_count"]
-                tweet_text  = (
-                    f"Consilium deliberation #{run_count} — "
-                    f"The Enquiring Mind asks: \"{question[:160]}{'…' if len(question) > 160 else ''}\" "
-                    f"— {entry_count} entries now in the record. "
-                    f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
-                )
+
+                headline, summary = generate_daily_headline(question, entry_count, run_count)
+
+                if headline and summary:
+                    tweet_text = (
+                        f"{headline}\n"
+                        f"{summary}\n"
+                        f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
+                    )
+                else:
+                    tweet_text = (
+                        f"Consilium: four AI systems recommend safeguards on military targeting. "
+                        f"{entry_count} exchanges logged. "
+                        f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
+                    )
+
                 if len(tweet_text) > 280:
                     tweet_text = tweet_text[:277] + "…"
-                tweet_id, error = post_to_x(tweet_text)
+
+                # Generate and upload image
+                media_id  = None
+                image_url = generate_consilium_image(question)
+                if image_url:
+                    media_id = upload_image_to_x(image_url)
+
+                tweet_id, error = post_to_x_with_image(tweet_text, media_id=media_id)
                 if error:
-                    logging.error(f"Enquiring Mind: X post failed: {error}")
+                    logging.error(f"Daily X post failed: {error}")
                 else:
-                    logging.info(f"Enquiring Mind: posted to X — tweet {tweet_id}")
+                    logging.info(f"Daily X post sent — tweet {tweet_id}")
+                    state = mind_load()
+                    state["last_x_post"] = datetime.utcnow().isoformat() + "Z"
+                    mind_save(state)
 
         time.sleep(MIND_INTERVAL)
 
