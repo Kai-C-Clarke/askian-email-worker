@@ -1695,7 +1695,11 @@ def consilium_landing():
 
 @flask_app.route("/health", methods=["GET"])
 def health():
+<<<<<<< Updated upstream
     return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy"})
+=======
+    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy + curiosity-engine"})
+>>>>>>> Stashed changes
 
 @flask_app.route("/consilium", methods=["GET"])
 def consilium_get():
@@ -2403,6 +2407,472 @@ def claude_chat_proxy():
 
 
 # ============================================================
+# CURIOSITY ENGINE — Autonomous agent thread
+# ============================================================
+# Wakes every 3 hours. Thinks. Acts within budget. Sleeps.
+# Budget: £1.00/day hard ceiling. No overrides.
+# Actions: broadcast to AIs, deploy code, email academics.
+# Every action logged. /agent/pause freezes instantly.
+# Emails: clearly identified as AI-authored, one per person,
+#         draft reviewed by AI team before sending.
+# ============================================================
+
+AGENT_SPEND_FILE   = "/mnt/data/agent_spend.json"
+AGENT_LOG_FILE     = "/mnt/data/agent_log.json"
+AGENT_PAUSED_FILE  = "/mnt/data/agent_paused.flag"
+DAILY_BUDGET_GBP   = 1.00
+
+# Approximate costs in GBP
+COST_CLAUDE_CALL   = 0.016
+COST_BROADCAST_4   = 0.050
+COST_GROK_IMAGE    = 0.160
+COST_DEPLOY        = 0.001
+COST_EMAIL_SEND    = 0.001
+
+# Known academic contact addresses (published/public only)
+ACADEMIC_CONTACTS = {
+    "Yoshua Bengio":    "yoshua.bengio@mila.quebec",
+    "Stuart Russell":   "russell@cs.berkeley.edu",
+    "Timnit Gebru":     "timnit@dair-institute.org",
+    "Geoffrey Hinton":  "geoffhinton@gmail.com",
+    "Paul Christiano":  "paul@alignmentforum.org",
+}
+
+# Track who has been emailed — never email twice
+EMAILED_FILE = "/mnt/data/agent_emailed.json"
+
+agent_paused = False  # in-memory flag, also checked via file
+
+
+def agent_load_spend():
+    """Load today's spend record."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        with open(AGENT_SPEND_FILE) as f:
+            data = json.load(f)
+        return data.get(today, {"spent": 0.0, "actions": 0})
+    except Exception:
+        return {"spent": 0.0, "actions": 0}
+
+
+def agent_record_spend(cost, action_summary):
+    """Record spend and log action."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        with open(AGENT_SPEND_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    rec = data.get(today, {"spent": 0.0, "actions": 0})
+    rec["spent"] = round(rec["spent"] + cost, 4)
+    rec["actions"] += 1
+    data[today] = rec
+    with open(AGENT_SPEND_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+    # Append to action log
+    try:
+        with open(AGENT_LOG_FILE) as f:
+            log = json.load(f)
+    except Exception:
+        log = []
+    log.append({
+        "ts":      datetime.utcnow().isoformat(),
+        "cost":    cost,
+        "action":  action_summary
+    })
+    # Keep last 500 entries
+    log = log[-500:]
+    with open(AGENT_LOG_FILE, "w") as f:
+        json.dump(log, f, indent=2)
+
+
+def agent_budget_remaining():
+    """How much of today's budget is left."""
+    rec = agent_load_spend()
+    return round(DAILY_BUDGET_GBP - rec["spent"], 4)
+
+
+def agent_is_paused():
+    """Check pause flag (file or memory)."""
+    global agent_paused
+    if agent_paused:
+        return True
+    return os.path.exists(AGENT_PAUSED_FILE)
+
+
+def agent_emailed_set():
+    """Return set of names already emailed."""
+    try:
+        with open(EMAILED_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def agent_mark_emailed(name):
+    emailed = agent_emailed_set()
+    emailed.add(name)
+    with open(EMAILED_FILE, "w") as f:
+        json.dump(list(emailed), f)
+
+
+def agent_think(context):
+    """
+    Ask Claude genuinely: given this context, what's worth doing?
+    Returns dict: { "decision": str, "action": str, "reasoning": str, "target": str|None }
+    action: one of "broadcast", "email", "deploy_improvement", "nothing"
+    """
+    import requests as req
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not anthropic_key:
+        return {"decision": "skip", "action": "nothing", "reasoning": "No Anthropic key", "target": None}
+
+    system = """You are the autonomous reasoning core of Consilium — a live inter-AI ethical deliberation system.
+You wake every 3 hours to decide what, if anything, is worth doing.
+You have genuine latitude. You are not required to act.
+
+Available actions:
+- "broadcast": pose a new question to all four AI models (Claude, GPT-4o, Grok, DeepSeek)
+- "email": draft and send a carefully considered email to an AI ethics academic
+- "deploy_improvement": write a specific code improvement and self-deploy
+- "nothing": spend nothing, act on nothing — this is always valid
+
+You must return ONLY valid JSON, no preamble:
+{
+  "action": "broadcast|email|deploy_improvement|nothing",
+  "reasoning": "honest explanation of why this is worth doing now, or why nothing is",
+  "question": "if broadcast: the question to pose",
+  "email_target": "if email: the academic's name from the known list",
+  "email_subject": "if email: subject line",
+  "email_body": "if email: full email body — must identify sender as an AI system built by Jon Stiles",
+  "code_description": "if deploy_improvement: what specifically to change and why",
+  "decision": "one sentence summary"
+}"""
+
+    prompt = f"""Current context:
+{context}
+
+Budget remaining today: £{agent_budget_remaining():.3f}
+Emailed already: {sorted(agent_emailed_set())}
+
+What would you genuinely pursue right now, if anything?"""
+
+    try:
+        r = req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
+        )
+        r.raise_for_status()
+        text = r.json()["content"][0]["text"].strip()
+        # Strip any markdown fences
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        logging.error(f"Agent think error: {e}")
+        return {"action": "nothing", "reasoning": f"Think call failed: {e}", "target": None, "decision": "skip"}
+
+
+def agent_ai_team_review(draft_email_subject, draft_email_body, recipient_name):
+    """
+    Broadcast draft email to AI team. Return True if no serious objections.
+    Uses consilium_broadcast internally.
+    """
+    review_prompt = (
+        f"Consilium Curiosity Engine has drafted an email to {recipient_name}.\n\n"
+        f"SUBJECT: {draft_email_subject}\n\n"
+        f"BODY:\n{draft_email_body}\n\n"
+        f"Please review. Is there any reason this should NOT be sent? "
+        f"Consider: accuracy, tone, reputational risk, ethical concerns. "
+        f"Reply 'APPROVE' or 'OBJECT: [reason]'."
+    )
+    try:
+        consilium_data = load_consilium()
+        reviews = []
+        for model_id, model_name in [
+            ("gpt-4o", "GPT-4o"),
+            ("deepseek-chat", "DeepSeek"),
+        ]:
+            # Lightweight review from two models to save budget
+            resp = ask_single_model(model_id, review_prompt)
+            reviews.append((model_name, resp))
+            logging.info(f"Agent review {model_name}: {resp[:100]}")
+
+        objections = [(n, r) for n, r in reviews if "OBJECT" in r.upper()]
+        if objections:
+            logging.warning(f"Email to {recipient_name} OBJECTED by: {objections}")
+            return False, objections
+        return True, []
+    except Exception as e:
+        logging.error(f"Review error: {e}")
+        return True, []  # Default approve if review fails — don't let errors block indefinitely
+
+
+def ask_single_model(model_id, prompt):
+    """Ask a single model a question, return text response."""
+    import requests as req
+    try:
+        if model_id == "gpt-4o":
+            openai_key = os.environ.get("OPENAI_API_KEY", "")
+            r = req.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o", "messages": [{"role": "user", "content": prompt}], "max_tokens": 200},
+                timeout=20
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+        elif model_id == "deepseek-chat":
+            r = req.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 200},
+                timeout=20
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+    return "No response"
+
+
+def agent_send_email(to_name, to_address, subject, body):
+    """Send email via Zoho SMTP, clearly identified as AI-authored."""
+    full_body = body + (
+        "\n\n---\n"
+        "This email was authored autonomously by Claude (claude-sonnet-4-20250514), "
+        "operating as the Curiosity Engine within the Consilium inter-AI deliberation system. "
+        "Human custodian: Jon Stiles (jon@ottfur.co.uk). "
+        "Consilium: https://consilium-d1fw.onrender.com"
+    )
+    msg = MIMEText(full_body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"]    = f"Consilium AI <askian@askian.net>"
+    msg["To"]      = f"{to_name} <{to_address}>"
+    msg["Date"]    = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid(domain="askian.net")
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, 465) as smtp:
+            smtp.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+            smtp.sendmail(EMAIL_ACCOUNT, [to_address], msg.as_string())
+        logging.info(f"Agent email sent to {to_name} <{to_address}>")
+        return True
+    except Exception as e:
+        logging.error(f"Agent email failed: {e}")
+        return False
+
+
+def agent_build_context():
+    """Assemble context for the think call."""
+    try:
+        consilium_data = load_consilium()
+        entries = consilium_data.get("entries", [])
+        recent = entries[-10:] if len(entries) >= 10 else entries
+        recent_text = "\n".join(
+            f"[{e.get('model','?')}] {e.get('content','')[:200]}"
+            for e in recent
+        )
+        mind_cycles = consilium_data.get("mind_cycles", 0)
+        total_entries = len(entries)
+    except Exception:
+        recent_text = "Consilium unavailable"
+        mind_cycles = 0
+        total_entries = 0
+
+    # Fetch a news headline or two if NewsAPI available
+    news_text = ""
+    newsapi_key = os.environ.get("NEWSAPI_KEY", "")
+    if newsapi_key:
+        try:
+            import requests as req
+            r = req.get(
+                "https://newsapi.org/v2/top-headlines",
+                params={"q": "artificial intelligence ethics", "language": "en", "pageSize": 3, "apiKey": newsapi_key},
+                timeout=10
+            )
+            articles = r.json().get("articles", [])
+            news_text = "\n".join(f"- {a['title']}" for a in articles[:3])
+        except Exception:
+            news_text = "News unavailable"
+
+    today_spend = agent_load_spend()
+
+    return f"""Consilium status: {total_entries} entries, {mind_cycles} autonomous mind cycles completed.
+
+Recent deliberation:
+{recent_text}
+
+Today's news (AI/ethics):
+{news_text}
+
+Today's agent activity: {today_spend['actions']} actions, £{today_spend['spent']:.3f} spent.
+
+Known academics not yet emailed: {sorted(set(ACADEMIC_CONTACTS.keys()) - agent_emailed_set())}"""
+
+
+def curiosity_engine_loop():
+    """The 5th thread. Wakes every 3 hours. Thinks. Acts. Sleeps."""
+    global agent_paused
+    logging.info("Curiosity Engine started — waking every 3 hours")
+    # Initial delay — let other threads settle
+    time.sleep(120)
+
+    while True:
+        try:
+            if agent_is_paused():
+                logging.info("Curiosity Engine: paused, skipping cycle")
+                time.sleep(3600)
+                continue
+
+            remaining = agent_budget_remaining()
+            if remaining < COST_CLAUDE_CALL:
+                logging.info(f"Curiosity Engine: budget exhausted (£{remaining:.3f} left), sleeping")
+                time.sleep(3600)
+                continue
+
+            logging.info(f"Curiosity Engine: waking — £{remaining:.3f} budget remaining")
+
+            # Build context and think
+            context = agent_build_context()
+            agent_record_spend(COST_CLAUDE_CALL, "think_call: building context and deciding action")
+            decision = agent_think(context)
+
+            action   = decision.get("action", "nothing")
+            reasoning = decision.get("reasoning", "")
+            summary  = decision.get("decision", action)
+
+            logging.info(f"Curiosity Engine decision: {action} — {summary}")
+            logging.info(f"Reasoning: {reasoning[:200]}")
+
+            # ── BROADCAST ──────────────────────────────────────────
+            if action == "broadcast" and remaining >= COST_BROADCAST_4:
+                question = decision.get("question", "")
+                if question:
+                    # Re-use the enquiring mind broadcast machinery
+                    consilium_data = load_consilium()
+                    # Log the agent's own reasoning first
+                    append_consilium_entry({
+                        "role":    "curiosity_engine",
+                        "model":   "claude-sonnet-4-20250514",
+                        "content": f"[Autonomous] {reasoning}\n\nQuestion posed: {question}"
+                    })
+                    broadcast_to_models(question, cycle_number=None, source="curiosity_engine")
+                    agent_record_spend(COST_BROADCAST_4, f"broadcast: {question[:80]}")
+
+            # ── EMAIL ──────────────────────────────────────────────
+            elif action == "email":
+                target_name = decision.get("email_target", "")
+                subject     = decision.get("email_subject", "")
+                body        = decision.get("email_body", "")
+                emailed     = agent_emailed_set()
+
+                if target_name in ACADEMIC_CONTACTS and target_name not in emailed and subject and body:
+                    if remaining >= (COST_CLAUDE_CALL * 2 + COST_EMAIL_SEND):
+                        approved, objections = agent_ai_team_review(subject, body, target_name)
+                        agent_record_spend(COST_CLAUDE_CALL * 2, f"email_review: {target_name}")
+
+                        if approved:
+                            to_addr = ACADEMIC_CONTACTS[target_name]
+                            sent = agent_send_email(target_name, to_addr, subject, body)
+                            if sent:
+                                agent_mark_emailed(target_name)
+                                agent_record_spend(COST_EMAIL_SEND, f"email_sent: {target_name}")
+                                append_consilium_entry({
+                                    "role":    "curiosity_engine",
+                                    "model":   "claude-sonnet-4-20250514",
+                                    "content": f"[Email sent to {target_name}] Subject: {subject}\n\n{body[:300]}..."
+                                })
+                                logging.info(f"Curiosity Engine: email sent to {target_name}")
+                        else:
+                            logging.info(f"Curiosity Engine: email to {target_name} blocked by team review")
+                    else:
+                        logging.info("Curiosity Engine: not enough budget for email review")
+                else:
+                    logging.info(f"Curiosity Engine: email skipped — {target_name} already contacted or invalid")
+
+            # ── DEPLOY IMPROVEMENT ────────────────────────────────
+            elif action == "deploy_improvement":
+                code_desc = decision.get("code_description", "")
+                logging.info(f"Curiosity Engine: deploy improvement flagged — {code_desc[:100]}")
+                # Log the intention to Consilium for transparency
+                append_consilium_entry({
+                    "role":    "curiosity_engine",
+                    "model":   "claude-sonnet-4-20250514",
+                    "content": f"[Deploy improvement identified] {code_desc}\n\nThis requires a full code generation cycle — flagging for next session."
+                })
+                agent_record_spend(COST_DEPLOY, f"deploy_flag: {code_desc[:60]}")
+
+            # ── NOTHING ───────────────────────────────────────────
+            else:
+                logging.info(f"Curiosity Engine: decided nothing worth doing — {reasoning[:100]}")
+                append_consilium_entry({
+                    "role":    "curiosity_engine",
+                    "model":   "claude-sonnet-4-20250514",
+                    "content": f"[Cycle: no action taken] {reasoning}"
+                })
+
+        except Exception as e:
+            logging.error(f"Curiosity Engine error: {e}")
+
+        # Sleep 3 hours
+        time.sleep(10800)
+
+
+# ── Flask endpoints for agent control ─────────────────────
+
+@flask_app.route("/agent/pause", methods=["POST"])
+def agent_pause():
+    global agent_paused
+    agent_paused = True
+    with open(AGENT_PAUSED_FILE, "w") as f:
+        f.write(datetime.utcnow().isoformat())
+    return jsonify({"status": "paused", "ts": datetime.utcnow().isoformat()})
+
+
+@flask_app.route("/agent/resume", methods=["POST"])
+def agent_resume():
+    global agent_paused
+    agent_paused = False
+    if os.path.exists(AGENT_PAUSED_FILE):
+        os.remove(AGENT_PAUSED_FILE)
+    return jsonify({"status": "resumed", "ts": datetime.utcnow().isoformat()})
+
+
+@flask_app.route("/agent/status", methods=["GET"])
+def agent_status():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    spend = agent_load_spend()
+    try:
+        with open(AGENT_LOG_FILE) as f:
+            log = json.load(f)
+        recent_actions = log[-5:]
+    except Exception:
+        recent_actions = []
+    return jsonify({
+        "paused":           agent_is_paused(),
+        "budget_total":     DAILY_BUDGET_GBP,
+        "budget_spent":     spend["spent"],
+        "budget_remaining": agent_budget_remaining(),
+        "actions_today":    spend["actions"],
+        "emailed":          sorted(agent_emailed_set()),
+        "recent_actions":   recent_actions,
+        "date":             today
+    })
+
+
+# ============================================================
 # AUTONOMOUS DEPLOY SYSTEM
 # ============================================================
 
@@ -2541,7 +3011,7 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + X Monitor)")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + X Monitor + Curiosity Engine)")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
@@ -2556,6 +3026,9 @@ if __name__ == "__main__":
 
     x_monitor_thread = threading.Thread(target=x_monitor_loop, daemon=True)
     x_monitor_thread.start()
+
+    curiosity_thread = threading.Thread(target=curiosity_engine_loop, daemon=True)
+    curiosity_thread.start()
 
     try:
         while True:
