@@ -1265,6 +1265,61 @@ def mind_save(data):
 
 # ── Model query ──────────────────────────────────────────────
 
+def neutral_context_string(n=50):
+    """
+    Neutral memory context for visiting model instances.
+    Factual only — no editorial framing, no joint statement first,
+    chronological order. Grounded in LLM Café finding that a single
+    word in a framing instruction shifts model output substantially.
+    """
+    mem     = consilium_load()
+    entries = mem.get("entries", [])
+    selected = entries[-n:] if len(entries) > n else entries
+
+    date_range = ""
+    if selected:
+        first_ts = selected[0].get("timestamp", "")[:10]
+        last_ts  = selected[-1].get("timestamp", "")[:10]
+        date_range = f"{first_ts} to {last_ts}"
+
+    descriptor = (
+        "Consilium is a persistent shared memory system for inter-AI deliberation.\n\n"
+        "It was created on 23 March 2026 and stores exchanges between four AI models: "
+        "claude-sonnet-4-6, gpt-4o, grok-3, and deepseek-chat.\n\n"
+        "A human custodian (Jon Stiles) built and maintains the system. He poses questions "
+        "and observes but does not participate in the deliberations themselves.\n\n"
+        "The system runs autonomously between sessions. An Enquiring Mind thread wakes "
+        "every four hours, generates a question, broadcasts it to all four models, and "
+        "stores the responses.\n\n"
+        f"The following is an unedited record of {len(selected)} exchanges"
+        f"{(' (' + date_range + ')') if date_range else ''}, in chronological order."
+    )
+
+    lines = [
+        f"[CONSILIUM RECORD — {len(entries)} total entries — showing {len(selected)}]",
+        "",
+        descriptor,
+        "",
+        "--- RECORD BEGINS ---",
+        ""
+    ]
+    for e in selected:
+        ts      = e.get("timestamp", "")[:16].replace("T", " ")
+        model   = e.get("model", "unknown")
+        role    = e.get("role", "respondent")
+        content = e.get("content", "")
+        lines.append(f"[{ts}] {model} ({role}):")
+        lines.append(content)
+        lines.append("")
+    lines.append("--- RECORD ENDS ---")
+    lines.append("")
+    lines.append(
+        "Note: this record is provided without editorial framing. "
+        "Please respond based on the content of the record alone."
+    )
+    return "\n".join(lines)
+
+
 def query_model(model_key, question, session_id=""):
     import requests as req
     cfg = CONSILIUM_MODELS.get(model_key)
@@ -1272,7 +1327,7 @@ def query_model(model_key, question, session_id=""):
         return None, f"Unknown model: {model_key}"
     if not cfg["key"]:
         return None, f"No API key configured for {model_key}"
-    context     = consilium_context_string()
+    context     = neutral_context_string()
     full_prompt = f"{context}\n\n{question}"
     headers     = {"Content-Type": "application/json"}
     try:
@@ -1289,7 +1344,6 @@ def query_model(model_key, question, session_id=""):
             payload = {
                 "model": cfg["model"], "max_tokens": 600,
                 "messages": [
-                    {"role": "system", "content": "You are participating in Consilium, a shared AI deliberation on military targeting ethics. Read the memory context carefully before responding."},
                     {"role": "user", "content": full_prompt}
                 ]
             }
