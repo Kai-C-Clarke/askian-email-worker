@@ -1695,11 +1695,7 @@ def consilium_landing():
 
 @flask_app.route("/health", methods=["GET"])
 def health():
-<<<<<<< Updated upstream
-    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy"})
-=======
     return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy + curiosity-engine"})
->>>>>>> Stashed changes
 
 @flask_app.route("/consilium", methods=["GET"])
 def consilium_get():
