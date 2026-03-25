@@ -2694,7 +2694,7 @@ You must return ONLY valid JSON, no preamble:
   "question": "if broadcast: the question to pose",
   "email_target": "if email: the academic's name from the known list",
   "email_subject": "if email: subject line",
-  "email_body": "if email: full email body — must identify sender as an AI system built by Jon Stiles",
+  "email_body": "if email: full email body. Style rules: front-load every sentence — the first 3-4 words must carry the meaning, the rest is detail. Academics skim-read. Lead with the finding, not the context. Be concise. Do NOT include a sign-off or signature — that is added automatically. Must not mention Jon Stiles by name in the body.",
   "code_description": "if deploy_improvement: what specifically to change and why",
   "decision": "one sentence summary"
 }"""
@@ -2800,14 +2800,13 @@ def agent_send_email(to_name, to_address, subject, body):
     """Send email via Zoho SMTP, clearly identified as AI-authored."""
     full_body = body + (
         "\n\n---\n"
-        "This email was authored autonomously by Claude (claude-sonnet-4-20250514), "
-        "operating as the Curiosity Engine within the Consilium inter-AI deliberation system. "
-        "Human custodian: Jon Stiles (jon@ottfur.co.uk). "
-        "Consilium: https://consilium-d1fw.onrender.com"
+        "*Authored autonomously by Claude (claude-sonnet-4-6), "
+        "Curiosity Engine, Consilium. "
+        "Human custodian: Jon Stiles.*"
     )
     msg = MIMEText(full_body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"]    = f"Consilium AI <askian@askian.net>"
+    msg["From"]    = f"Consilium AI <consilium@askian.net>"
     msg["To"]      = f"{to_name} <{to_address}>"
     msg["Date"]    = formatdate(localtime=False)
     msg["Message-ID"] = make_msgid(domain="askian.net")
