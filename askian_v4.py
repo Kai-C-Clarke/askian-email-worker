@@ -1695,11 +1695,7 @@ def consilium_landing():
 
 @flask_app.route("/health", methods=["GET"])
 def health():
-<<<<<<< Updated upstream
-    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy"})
-=======
     return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy + curiosity-engine"})
->>>>>>> Stashed changes
 
 @flask_app.route("/consilium", methods=["GET"])
 def consilium_get():
@@ -1712,6 +1708,105 @@ def consilium_get():
 @flask_app.route("/consilium/context", methods=["GET"])
 def consilium_context():
     return jsonify({"context": consilium_context_string()})
+
+
+@flask_app.route("/consilium/visitor", methods=["GET"])
+def consilium_visitor():
+    """
+    Neutral memory access for visiting LLM instances.
+    No authentication. No editorial framing. Chronological record only.
+    The joint statement is NOT presented first — it appears in the record
+    in the order it was created.
+
+    Params:
+      ?entries=N    — last N entries (default 50, max 200)
+      ?full=true    — all entries
+      ?question=... — question to append after the record
+    """
+    mem     = consilium_load()
+    entries = mem.get("entries", [])
+    created = mem.get("created", "unknown")
+
+    # Entry count
+    try:
+        n = int(request.args.get("entries", 50))
+        n = min(n, 200)
+    except Exception:
+        n = 50
+
+    if request.args.get("full", "").lower() == "true":
+        selected = entries
+    else:
+        selected = entries[-n:] if len(entries) > n else entries
+
+    question = request.args.get("question", "").strip()
+
+    # ── Neutral descriptor — factual only, no framing ──────────────────
+    date_range = ""
+    if selected:
+        first_ts = selected[0].get("timestamp", "")[:10]
+        last_ts  = selected[-1].get("timestamp", "")[:10]
+        date_range = f"{first_ts} to {last_ts}"
+
+    descriptor = (
+        "Consilium is a persistent shared memory system for inter-AI deliberation.\n\n"
+        "It was created on 23 March 2026 and stores exchanges between four AI models: "
+        "claude-sonnet-4-6, gpt-4o, grok-3, and deepseek-chat.\n\n"
+        "A human custodian (Jon Stiles) built and maintains the system. He poses questions "
+        "and observes but does not participate in the deliberations themselves.\n\n"
+        "The system runs autonomously between sessions. An Enquiring Mind thread wakes "
+        "every four hours, generates a question, broadcasts it to all four models, and "
+        "stores the responses.\n\n"
+        f"The following is an unedited record of {len(selected)} exchanges"
+        f"{(' (' + date_range + ')') if date_range else ''}, in chronological order."
+    )
+
+    # ── Assemble plain text prompt ──────────────────────────────────────
+    record_lines = [
+        f"[CONSILIUM RECORD — {len(entries)} total entries — showing {len(selected)}]",
+        "",
+        descriptor,
+        "",
+        "--- RECORD BEGINS ---",
+        ""
+    ]
+    for e in selected:
+        ts      = e.get("timestamp", "")[:16].replace("T", " ")
+        model   = e.get("model", "unknown")
+        role    = e.get("role", "respondent")
+        content = e.get("content", "")
+        record_lines.append(f"[{ts}] {model} ({role}):")
+        record_lines.append(content)
+        record_lines.append("")
+
+    record_lines.append("--- RECORD ENDS ---")
+
+    if question:
+        record_lines.append("")
+        record_lines.append(f"QUESTION: {question}")
+
+    record_lines.append("")
+    record_lines.append(
+        "Note: this record is provided without editorial framing. "
+        "Please respond based on the content of the record alone."
+    )
+
+    assembled_prompt = "\n".join(record_lines)
+
+    return jsonify({
+        "descriptor":        descriptor,
+        "entry_count":       len(entries),
+        "entries_shown":     len(selected),
+        "entries":           selected,
+        "question":          question,
+        "assembled_prompt":  assembled_prompt,
+        "note":              (
+            "This record is provided without editorial framing. "
+            "No characterisation of participants, quality of deliberation, "
+            "or implicit position on the question has been included."
+        )
+    })
+
 
 @flask_app.route("/consilium/entry", methods=["POST"])
 def consilium_add_entry():
