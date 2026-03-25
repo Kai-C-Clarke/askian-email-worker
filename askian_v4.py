@@ -2403,6 +2403,137 @@ def claude_chat_proxy():
 
 
 # ============================================================
+# AUTONOMOUS DEPLOY SYSTEM
+# ============================================================
+
+GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO       = os.environ.get("GITHUB_REPO", "Kai-C-Clarke/askian-email-worker")
+RENDER_API_KEY    = os.environ.get("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-d70na524d50c73f1safg")
+
+
+def github_get_file(path):
+    """Get current file content and SHA from GitHub."""
+    import requests as req
+    r = req.get(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+        headers={"Authorization": f"token {GITHUB_TOKEN}",
+                 "Accept": "application/vnd.github.v3+json"},
+        timeout=15
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def github_push_file(path, content, message, sha):
+    """Push updated file to GitHub."""
+    import requests as req
+    import base64
+    r = req.put(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+        headers={"Authorization": f"token {GITHUB_TOKEN}",
+                 "Accept": "application/vnd.github.v3+json"},
+        json={
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+            "sha": sha
+        },
+        timeout=15
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def render_trigger_deploy():
+    """Trigger a Render redeploy."""
+    import requests as req
+    r = req.post(
+        f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys",
+        headers={"Authorization": f"Bearer {RENDER_API_KEY}",
+                 "Accept": "application/json"},
+        json={"clearCache": "do_not_clear"},
+        timeout=15
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def render_deploy_status(deploy_id):
+    """Check deploy status."""
+    import requests as req
+    r = req.get(
+        f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys/{deploy_id}",
+        headers={"Authorization": f"Bearer {RENDER_API_KEY}",
+                 "Accept": "application/json"},
+        timeout=15
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@flask_app.route("/consilium/deploy", methods=["POST"])
+def consilium_deploy():
+    """
+    Autonomously update askian_v4.py on GitHub and trigger Render redeploy.
+    Requires key. Body: { "content": "full file content", "message": "commit message" }
+    """
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+
+    if not GITHUB_TOKEN or not RENDER_API_KEY:
+        return jsonify({"error": "GITHUB_TOKEN or RENDER_API_KEY not configured"}), 500
+
+    body = request.get_json()
+    if not body or not body.get("content"):
+        return jsonify({"error": "content required"}), 400
+
+    content = body["content"]
+    message = body.get("message", f"Autonomous update by Consilium {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+
+    try:
+        # Get current SHA
+        file_data = github_get_file("askian_v4.py")
+        sha = file_data["sha"]
+        logging.info(f"Deploy: got current SHA {sha[:8]}")
+
+        # Push new content
+        result = github_push_file("askian_v4.py", content, message, sha)
+        commit_sha = result["commit"]["sha"]
+        logging.info(f"Deploy: pushed commit {commit_sha[:8]}")
+
+        # Trigger Render redeploy
+        deploy = render_trigger_deploy()
+        deploy_id = deploy.get("id", "unknown")
+        logging.info(f"Deploy: triggered Render deploy {deploy_id}")
+
+        return jsonify({
+            "status": "deploying",
+            "commit": commit_sha[:8],
+            "deploy_id": deploy_id,
+            "message": message
+        }), 202
+
+    except Exception as e:
+        logging.error(f"Deploy failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@flask_app.route("/consilium/deploy/status", methods=["GET"])
+def consilium_deploy_status():
+    """Check status of a deploy. Pass ?deploy_id=xxx"""
+    if not RENDER_API_KEY:
+        return jsonify({"error": "RENDER_API_KEY not configured"}), 500
+    deploy_id = request.args.get("deploy_id")
+    if not deploy_id:
+        return jsonify({"error": "deploy_id required"}), 400
+    try:
+        status = render_deploy_status(deploy_id)
+        return jsonify({"status": status.get("status"), "deploy": status})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
