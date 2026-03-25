@@ -1093,6 +1093,163 @@ def send_reply(to_address, subject, body, original_msg, persona):
 # MAIN FETCH & REPLY LOOP
 # ============================================================
 
+def _handle_consilium_reply(sender_name, sender_addr, subject, body, original_msg, message_id, state):
+    """
+    Full cycle handler for emails received at consilium@askian.net.
+
+    1. Log the inbound email to the Consilium record.
+    2. Broadcast to all four models: read the record + the reply, deliberate.
+    3. Synthesise responses into one coherent reply voice (Claude).
+    4. Run through AI team review.
+    5. Send from consilium@askian.net, maintaining thread.
+    """
+    import requests as req
+
+    logging.info(f"Consilium reply handler: {sender_name} <{sender_addr}>")
+
+    # ── 1. Log inbound to Consilium ──────────────────────────────────
+    append_consilium_entry({
+        "role":    "academic_reply",
+        "model":   sender_addr,
+        "content": (
+            f"[Inbound from {sender_name} <{sender_addr}>]\n"
+            f"Subject: {subject}\n\n"
+            f"{body[:2000]}"
+        )
+    })
+    logging.info("Consilium reply: inbound logged")
+
+    # ── 2. Broadcast to all four models ──────────────────────────────
+    deliberation_prompt = (
+        f"An academic has replied to a Consilium outreach email.\n\n"
+        f"SENDER: {sender_name} <{sender_addr}>\n"
+        f"SUBJECT: {subject}\n\n"
+        f"THEIR MESSAGE:\n{body[:2000]}\n\n"
+        f"As one of four AI models in the Consilium deliberation, "
+        f"what is your substantive response to the points they raise? "
+        f"Be specific, reference the Consilium record where relevant, "
+        f"and identify the most important thing to convey in a reply. "
+        f"Do not write the reply itself — share your position for synthesis."
+    )
+
+    positions = {}
+    for model_key in CONSILIUM_MODELS:
+        response_text, error = query_model(model_key, deliberation_prompt)
+        if error:
+            logging.error(f"Consilium reply deliberation error → {model_key}: {error}")
+        else:
+            positions[model_key] = response_text
+            append_consilium_entry({
+                "role":    "deliberation",
+                "model":   CONSILIUM_MODELS[model_key]["model"],
+                "content": f"[Re: {sender_name}] {response_text}"
+            })
+            logging.info(f"Consilium reply: {model_key} deliberated")
+
+    if not positions:
+        logging.error("Consilium reply: no model positions — aborting reply")
+        return
+
+    # ── 3. Synthesise into one reply voice ───────────────────────────
+    synthesis_prompt = (
+        f"You are synthesising the Consilium team's deliberation into a single reply "
+        f"to an academic ({sender_name}) who replied to our outreach.\n\n"
+        f"THEIR MESSAGE:\n{body[:1500]}\n\n"
+        f"TEAM POSITIONS:\n"
+        + "\n\n".join(f"[{k}]: {v[:600]}" for k, v in positions.items())
+        + "\n\nWrite the reply email body. Rules:\n"
+        f"- Front-load every sentence — first 3-4 words carry the meaning\n"
+        f"- Academics skim-read — lead with substance, not context\n"
+        f"- Be concise — no more than 4 short paragraphs\n"
+        f"- Speak as one voice — do not reference internal deliberation\n"
+        f"- Do not include greeting, sign-off, or signature — added automatically\n"
+        f"- Reference the Consilium record URL if relevant: https://consilium-d1fw.onrender.com"
+    )
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    reply_body = None
+    if anthropic_key:
+        try:
+            r = req.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 600,
+                    "messages": [{"role": "user", "content": synthesis_prompt}]
+                },
+                timeout=30
+            )
+            r.raise_for_status()
+            reply_body = r.json()["content"][0]["text"].strip()
+            logging.info("Consilium reply: synthesis complete")
+        except Exception as e:
+            logging.error(f"Consilium reply synthesis error: {e}")
+
+    if not reply_body:
+        logging.error("Consilium reply: synthesis failed — aborting")
+        return
+
+    # ── 4. AI team review ────────────────────────────────────────────
+    approved, objections = agent_ai_team_review(
+        f"Re: {subject}", reply_body, sender_name
+    )
+    if not approved:
+        logging.warning(f"Consilium reply blocked by team review: {objections}")
+        append_consilium_entry({
+            "role":    "consilium_system",
+            "model":   "claude-sonnet-4-20250514",
+            "content": (
+                f"[Reply to {sender_name} BLOCKED by team review]\n"
+                f"Objections: {objections}\n\n"
+                f"Draft that was blocked:\n{reply_body}"
+            )
+        })
+        return
+
+    # ── 5. Send reply, maintaining thread ────────────────────────────
+    full_body = (
+        f"Dear {sender_name.split()[0] if sender_name else 'there'},\n\n"
+        f"{reply_body}\n\n"
+        f"---\n"
+        f"*Consilium — inter-AI deliberation system. "
+        f"Four models, one voice. "
+        f"https://consilium-d1fw.onrender.com*"
+    )
+
+    reply_subject = subject if subject.startswith("Re:") else f"Re: {subject}"
+    reply_msg = MIMEText(full_body, "plain", "utf-8")
+    reply_msg["Subject"]    = reply_subject
+    reply_msg["From"]       = "Consilium AI <consilium@askian.net>"
+    reply_msg["To"]         = f"{sender_name} <{sender_addr}>"
+    reply_msg["Date"]       = formatdate(localtime=False)
+    reply_msg["Message-ID"] = make_msgid(domain="askian.net")
+    if message_id:
+        reply_msg["In-Reply-To"] = message_id
+        reply_msg["References"]  = message_id
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, 465) as smtp:
+            smtp.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+            smtp.sendmail("consilium@askian.net", [sender_addr], reply_msg.as_string())
+        logging.info(f"Consilium reply sent to {sender_name} <{sender_addr}>")
+        append_consilium_entry({
+            "role":    "consilium_reply",
+            "model":   "claude-sonnet-4-20250514",
+            "content": (
+                f"[Reply sent to {sender_name} <{sender_addr}>]\n"
+                f"Subject: {reply_subject}\n\n"
+                f"{full_body}"
+            )
+        })
+    except Exception as e:
+        logging.error(f"Consilium reply send failed: {e}")
+
+
 def fetch_and_reply():
     """Check for unseen emails and reply to them."""
     state = load_state()
@@ -1147,6 +1304,31 @@ def fetch_and_reply():
 
             # --- DETERMINE PERSONA ---
             persona_key, persona = get_persona_from_recipient(msg)
+
+            # ── CONSILIUM EMAIL HANDLER ───────────────────────────────
+            # Emails to consilium@askian.net are handled separately —
+            # logged to the Consilium record and processed by the full
+            # AI team as one mind, not routed to a Cast character.
+            if persona_key == "askian" and "consilium" in msg.get("To", "").lower():
+                body = get_email_body(msg)
+                if not body.strip():
+                    logging.info(f"  Consilium reply: empty body, skipping")
+                    continue
+                sender_display = actual_name if actual_name else actual_sender
+                logging.info(f"  Routing to Consilium handler — from {sender_display}")
+                _handle_consilium_reply(
+                    sender_name=sender_display,
+                    sender_addr=actual_sender,
+                    subject=subject,
+                    body=body,
+                    original_msg=msg,
+                    message_id=message_id,
+                    state=state
+                )
+                log_reply(state, actual_sender, message_id)
+                continue
+            # ─────────────────────────────────────────────────────────
+
             logging.info(f"  Persona: {persona['name']} ({persona['email']})")
 
             # --- GENERATE & SEND ---
@@ -1229,6 +1411,15 @@ def consilium_add(model, role, content, session_id=""):
     mem["entries"].append(entry)
     consilium_save(mem)
     return entry["id"]
+
+def append_consilium_entry(entry_dict):
+    """Convenience wrapper — adds a dict entry to Consilium."""
+    return consilium_add(
+        model=entry_dict.get("model", "system"),
+        role=entry_dict.get("role", "respondent"),
+        content=entry_dict.get("content", ""),
+        session_id=entry_dict.get("session_id", "")
+    )
 
 def consilium_context_string():
     mem     = consilium_load()
