@@ -3211,6 +3211,59 @@ def agent_status():
     })
 
 
+@flask_app.route("/agent/email/send", methods=["POST"])
+def agent_email_send():
+    """
+    Manual email trigger — send from consilium@askian.net at will.
+    Requires key. Does NOT require AI team review (human is triggering).
+    Body: {
+      "to_name": "...",
+      "to_address": "...",
+      "subject": "...",
+      "body": "...",
+      "mark_emailed": true|false  (optional, default false)
+    }
+    """
+    if not consilium_require_key():
+        return jsonify({"error": "Unauthorised"}), 401
+
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "JSON body required"}), 400
+
+    to_name    = body.get("to_name", "")
+    to_address = body.get("to_address", "")
+    subject    = body.get("subject", "")
+    email_body = body.get("body", "")
+    mark       = body.get("mark_emailed", False)
+
+    if not to_address or not subject or not email_body:
+        return jsonify({"error": "to_address, subject and body required"}), 400
+
+    sent = agent_send_email(to_name, to_address, subject, email_body)
+
+    if sent:
+        if mark and to_name in ACADEMIC_CONTACTS:
+            agent_mark_emailed(to_name)
+        agent_record_spend(COST_EMAIL_SEND, f"manual_email: {to_name} <{to_address}>")
+        append_consilium_entry({
+            "role":    "curiosity_engine",
+            "model":   "claude-sonnet-4-20250514",
+            "content": (
+                f"[Manual email sent to {to_name} <{to_address}>]\n"
+                f"Subject: {subject}\n\n"
+                f"{email_body[:500]}..."
+            )
+        })
+        return jsonify({
+            "status":  "sent",
+            "to":      f"{to_name} <{to_address}>",
+            "subject": subject
+        })
+    else:
+        return jsonify({"error": "Send failed — check logs"}), 500
+
+
 # ============================================================
 # AUTONOMOUS DEPLOY SYSTEM
 # ============================================================
