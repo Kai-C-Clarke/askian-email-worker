@@ -1695,7 +1695,7 @@ def consilium_landing():
 
 @flask_app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind"})
+    return jsonify({"status": "ok", "service": "askian-v4 + consilium + enquiring-mind + autonomous-deploy"})
 
 @flask_app.route("/consilium", methods=["GET"])
 def consilium_get():
