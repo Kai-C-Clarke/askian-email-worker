@@ -3338,6 +3338,13 @@ def consilium_deploy():
     """
     Autonomously update askian_v4.py on GitHub and trigger Render redeploy.
     Requires key. Body: { "content": "full file content", "message": "commit message" }
+
+    Safeguards (in order):
+    1. Content must be present
+    2. Must be at least 50,000 chars — rejects accidental test payloads
+    3. Must contain key structural markers proving it is askian_v4.py
+    4. Must pass Python syntax check via compile()
+    Only then does it touch GitHub.
     """
     if not consilium_require_key():
         return jsonify({"error": "Unauthorised"}), 401
@@ -3351,6 +3358,36 @@ def consilium_deploy():
 
     content = body["content"]
     message = body.get("message", f"Autonomous update by Consilium {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+
+    # Safeguard 1: minimum size
+    if len(content) < 50000:
+        return jsonify({
+            "error": f"Content too small ({len(content)} chars). Full askian_v4.py must be >50,000 chars. Rejecting to prevent accidental corruption."
+        }), 400
+
+    # Safeguard 2: structural markers
+    required_markers = [
+        "def fetch_and_reply",
+        "def consilium_deploy",
+        "def curiosity_engine_loop",
+        "PERSONAS",
+        "flask_app"
+    ]
+    missing = [m for m in required_markers if m not in content]
+    if missing:
+        return jsonify({
+            "error": f"Content missing required markers: {missing}. This does not appear to be askian_v4.py."
+        }), 400
+
+    # Safeguard 3: Python syntax check
+    try:
+        compile(content, "askian_v4.py", "exec")
+    except SyntaxError as e:
+        return jsonify({
+            "error": f"Syntax error at line {e.lineno}: {e.msg}. Deploy rejected — file not touched."
+        }), 400
+
+    logging.info(f"Deploy: all safeguards passed — {len(content)} chars, syntax clean")
 
     try:
         # Get current SHA
@@ -3372,7 +3409,8 @@ def consilium_deploy():
             "status": "deploying",
             "commit": commit_sha[:8],
             "deploy_id": deploy_id,
-            "message": message
+            "message": message,
+            "content_size": len(content)
         }), 202
 
     except Exception as e:
