@@ -3550,6 +3550,118 @@ def consilium_deploy_status():
 
 
 # ============================================================
+# PEARL VISITOR MEMORY
+# ============================================================
+
+PEARL_MEMORY_DIR = "/mnt/data/pearl"
+
+
+def pearl_safe_name(name):
+    """Sanitise visitor name to a safe filename."""
+    import re
+    return re.sub(r'[^a-z0-9_\-]', '_', name.strip().lower())[:60]
+
+
+def pearl_memory_path(name):
+    os.makedirs(PEARL_MEMORY_DIR, exist_ok=True)
+    return os.path.join(PEARL_MEMORY_DIR, pearl_safe_name(name) + ".json")
+
+
+@flask_app.route("/pearl/memory", methods=["GET"])
+def pearl_memory_get():
+    """
+    GET /pearl/memory?name=Margaret
+    Returns Pearl's memory of a named visitor, or found:false if unknown.
+    """
+    name = request.args.get("name", "").strip()
+    if not name:
+        return jsonify({"found": False})
+
+    path = pearl_memory_path(name)
+    if not os.path.exists(path):
+        return jsonify({"found": False, "name": name})
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return jsonify({"found": True, **data})
+    except Exception:
+        return jsonify({"found": False})
+
+
+@flask_app.route("/pearl/memory", methods=["POST"])
+def pearl_memory_post():
+    """
+    POST /pearl/memory
+    Body: { "name": "Margaret", "summary": "...", "topics": [...] }
+    Saves or updates Pearl's memory of this visitor.
+    """
+    body = request.get_json()
+    if not body or not body.get("name") or not body.get("summary"):
+        return jsonify({"error": "name and summary required"}), 400
+
+    name = body["name"].strip()
+    path = pearl_memory_path(name)
+
+    existing = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+
+    now = datetime.utcnow().isoformat() + "Z"
+    record = {
+        "name": name,
+        "visitCount": existing.get("visitCount", 0) + 1,
+        "firstVisit": existing.get("firstVisit", now),
+        "lastVisit": now,
+        "summary": body["summary"].strip(),
+        "topics": body.get("topics", existing.get("topics", [])),
+        "history": (existing.get("history", []) + [{
+            "date": now,
+            "summary": body["summary"].strip()
+        }])[-5:]  # Keep last 5 visit summaries
+    }
+
+    with open(path, "w") as f:
+        json.dump(record, f, indent=2)
+
+    logging.info(f"Pearl memory saved for '{name}' (visit #{record['visitCount']})")
+    return jsonify({"success": True, "visitCount": record["visitCount"]})
+
+
+@flask_app.route("/pearl/visitors", methods=["GET"])
+def pearl_visitors():
+    """
+    GET /pearl/visitors
+    Returns a list of everyone Pearl has met — name, visit count, last visit, topics.
+    """
+    if not os.path.exists(PEARL_MEMORY_DIR):
+        return jsonify({"visitors": []})
+
+    visitors = []
+    for fname in os.listdir(PEARL_MEMORY_DIR):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(PEARL_MEMORY_DIR, fname)) as f:
+                d = json.load(f)
+            visitors.append({
+                "name":       d.get("name"),
+                "visitCount": d.get("visitCount", 0),
+                "lastVisit":  d.get("lastVisit"),
+                "topics":     d.get("topics", [])
+            })
+        except Exception:
+            pass
+
+    visitors.sort(key=lambda v: v.get("lastVisit") or "", reverse=True)
+    return jsonify({"visitors": visitors, "total": len(visitors)})
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
