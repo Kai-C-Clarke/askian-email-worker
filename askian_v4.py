@@ -1592,11 +1592,11 @@ def generate_next_question():
 
 def should_post_today():
     """
-    True if within 18:00-19:00 UTC (12:00-13:00 CST) and
-    haven't posted today yet.
+    True if after 09:00 UTC and haven't posted today yet.
+    Posts on the first Mind cycle of the day after 9am UTC.
     """
     now = datetime.utcnow()
-    if not (18 <= now.hour < 19):
+    if now.hour < 9:
         return False
     state = mind_load()
     last_post = state.get("last_x_post", "")
