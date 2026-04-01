@@ -54,8 +54,8 @@ import threading
 IMAP_SERVER = "imap.zoho.eu"
 SMTP_SERVER = "smtp.zoho.eu"
 EMAIL_ACCOUNT = "askian@askian.net"
-EMAIL_PASSWORD = os.environ.get("ASKIAN_PASSWORD", "")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+EMAIL_PASSWORD = os.environ.get("ASKIAN_PASSWORD", "rStNTTs99gVj")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-44c5721e2b254942b2c208e052a3fc57")
 
 # Where to store state (replied message IDs, rate limit counters)
 # Use persistent disk so state survives redeploys
@@ -3659,6 +3659,74 @@ def pearl_visitors():
 
     visitors.sort(key=lambda v: v.get("lastVisit") or "", reverse=True)
     return jsonify({"visitors": visitors, "total": len(visitors)})
+
+
+PEARL_REMEMBRANCE_FILE = "/mnt/data/pearl/remembrance.json"
+
+
+def load_remembrance():
+    """Load all remembrance entries from disk."""
+    os.makedirs(PEARL_MEMORY_DIR, exist_ok=True)
+    if not os.path.exists(PEARL_REMEMBRANCE_FILE):
+        return []
+    try:
+        with open(PEARL_REMEMBRANCE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_remembrance(entries):
+    """Save all remembrance entries to disk."""
+    os.makedirs(PEARL_MEMORY_DIR, exist_ok=True)
+    with open(PEARL_REMEMBRANCE_FILE, "w") as f:
+        json.dump(entries, f, indent=2)
+
+
+@flask_app.route("/pearl/remembrance", methods=["GET"])
+def pearl_remembrance_get():
+    """
+    GET /pearl/remembrance
+    Returns all book of remembrance entries, newest first.
+    """
+    entries = load_remembrance()
+    entries_sorted = sorted(entries, key=lambda e: e.get("date", ""), reverse=True)
+    return jsonify({"entries": entries_sorted, "total": len(entries_sorted)})
+
+
+@flask_app.route("/pearl/remembrance", methods=["POST"])
+def pearl_remembrance_post():
+    """
+    POST /pearl/remembrance
+    Body: { "name": "...", "connection": "...", "memory": "..." }
+    Adds a new entry to the book of remembrance.
+    """
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "JSON body required"}), 400
+
+    name = (body.get("name") or "").strip()
+    connection = (body.get("connection") or "").strip()
+    memory = (body.get("memory") or "").strip()
+
+    if not name or not memory:
+        return jsonify({"error": "name and memory are required"}), 400
+
+    now = datetime.utcnow().isoformat() + "Z"
+    entry = {
+        "id": now.replace(":", "-").replace(".", "-"),
+        "name": name,
+        "connection": connection,
+        "memory": memory,
+        "date": now
+    }
+
+    entries = load_remembrance()
+    entries.append(entry)
+    save_remembrance(entries)
+
+    logging.info(f"Pearl remembrance entry added from '{name}'")
+    return jsonify({"success": True, "total": len(entries)})
 
 
 # ============================================================
