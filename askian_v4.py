@@ -55,7 +55,7 @@ IMAP_SERVER = "imap.zoho.eu"
 SMTP_SERVER = "smtp.zoho.eu"
 EMAIL_ACCOUNT = "askian@askian.net"
 EMAIL_PASSWORD = os.environ.get("ASKIAN_PASSWORD", "rStNTTs99gVj")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-44c5721e2b254942b2c208e052a3fc57")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 # Where to store state (replied message IDs, rate limit counters)
 # Use persistent disk so state survives redeploys
