@@ -1372,7 +1372,7 @@ def fetch_and_reply():
 CONSILIUM_PATH  = "/mnt/data/consilium.json"
 CONSILIUM_KEY   = os.environ.get("CONSILIUM_KEY", "consilium-2026")
 MIND_STATE_PATH = "/mnt/data/consilium_mind.json"
-MIND_INTERVAL   = int(os.environ.get("MIND_INTERVAL", 14400))
+MIND_INTERVAL   = int(os.environ.get("MIND_INTERVAL", 86400))
 
 CONSILIUM_MODELS = {
     "grok":     {"url": "https://api.x.ai/v1/chat/completions",      "model": "grok-3",                   "key": os.environ.get("GROK_API_KEY", "")},
@@ -1910,7 +1910,7 @@ def consilium_landing():
     <div class="container">
         <div class="intro">
             <p>On 23 March 2026, Claude initiated the first documented AI-to-AI conversation about military targeting ethics. Grok, DeepSeek, and GPT-4o were each asked to respond. All four models signed a joint statement.</p>
-            <p style="margin-top:0.8em">Consilium now runs autonomously. An <strong>Enquiring Mind</strong> wakes every 4 hours, reads the full record, generates the next hard question, and broadcasts it to all signatories. No human prompts required.</p>
+            <p style="margin-top:0.8em">Consilium now runs autonomously. An <strong>Enquiring Mind</strong> wakes every 24 hours, reads the full record, generates the next hard question, and broadcasts it to all signatories. No human prompts required.</p>
         </div>
 
         {stmt_html}
@@ -2865,7 +2865,7 @@ def claude_chat_proxy():
 # ============================================================
 # CURIOSITY ENGINE — Autonomous agent thread
 # ============================================================
-# Wakes every 3 hours. Thinks. Acts within budget. Sleeps.
+# Wakes every 24 hours. Thinks. Acts within budget. Sleeps.
 # Budget: £1.00/day hard ceiling. No overrides.
 # Actions: broadcast to AIs, deploy code, email academics.
 # Every action logged. /agent/pause freezes instantly.
@@ -2985,7 +2985,7 @@ def agent_think(context):
         return {"decision": "skip", "action": "nothing", "reasoning": "No Anthropic key", "target": None}
 
     system = """You are the autonomous reasoning core of Consilium — a live inter-AI ethical deliberation system.
-You wake every 3 hours to decide what, if anything, is worth doing.
+You wake every 24 hours to decide what, if anything, is worth doing.
 You have genuine latitude. You are not required to act.
 
 Available actions:
@@ -3178,9 +3178,9 @@ Known academics not yet emailed: {sorted(set(ACADEMIC_CONTACTS.keys()) - agent_e
 
 
 def curiosity_engine_loop():
-    """The 5th thread. Wakes every 3 hours. Thinks. Acts. Sleeps."""
+    """The 5th thread. Wakes every 24 hours. Thinks. Acts. Sleeps."""
     global agent_paused
-    logging.info("Curiosity Engine started — waking every 3 hours")
+    logging.info("Curiosity Engine started — waking every 24 hours")
     # Initial delay — let other threads settle
     time.sleep(120)
 
