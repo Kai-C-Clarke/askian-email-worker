@@ -3737,7 +3737,7 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + X Monitor + Curiosity Engine)")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + Curiosity Engine) [X Monitor suspended Apr 2026]")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
@@ -3750,8 +3750,8 @@ if __name__ == "__main__":
     mind_thread = threading.Thread(target=enquiring_mind_loop, daemon=True)
     mind_thread.start()
 
-    x_monitor_thread = threading.Thread(target=x_monitor_loop, daemon=True)
-    x_monitor_thread.start()
+    # x_monitor_thread = threading.Thread(target=x_monitor_loop, daemon=True)  # X posting suspended Apr 2026
+    # x_monitor_thread.start()  # X posting suspended Apr 2026
 
     curiosity_thread = threading.Thread(target=curiosity_engine_loop, daemon=True)
     curiosity_thread.start()
