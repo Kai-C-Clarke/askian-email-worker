@@ -3737,12 +3737,15 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + Curiosity Engine) [X Monitor suspended Apr 2026]")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + Curiosity Engine + Consilium News) [X Monitor suspended Apr 2026]")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
         logging.info(f"  {p['name']:25s} → {p['email']}")
     logging.info("=" * 50)
+
+    news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
+    news_thread.start()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -3762,3 +3765,681 @@ if __name__ == "__main__":
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
         logging.info("AskIan v4 stopped by user (Ctrl+C)")
+
+# ============================================================
+# CONSILIUM NEWS MODULE — appended
+# ============================================================
+
+# ============================================================
+# CONSILIUM NEWS — Daily AI-deliberated news broadcast
+# ============================================================
+# Appended to askian_v4.py
+# Runs once daily at 06:00 UTC
+# Pipeline: source → select → deliberate → write → illustrate → publish
+# Routes: GET /news (HTML page), GET /news/state (JSON), POST /news/generate
+# ============================================================
+
+import xml.etree.ElementTree as ET
+import re
+import hashlib
+
+# ── Configuration ────────────────────────────────────────────
+
+NEWS_STATE_PATH   = "/mnt/data/consilium_news.json"
+NEWSAPI_KEY       = os.environ.get("NEWSAPI_KEY", "")
+GROK_API_KEY      = os.environ.get("GROK_API_KEY", "")
+GROK_IMAGE_MODEL  = "grok-imagine-image"
+GROK_CHAT_MODEL   = "grok-4-1-fast-reasoning"
+
+# Regional RSS feeds — same story, multiple perspectives
+NEWS_RSS_FEEDS = {
+    "Al Jazeera English":  "https://www.aljazeera.com/xml/rss/all.xml",
+    "Press TV":            "https://www.presstv.ir/rss",
+    "Haaretz":             "https://www.haaretz.com/cmlink/1.628764",
+    "Arab News":           "https://www.arabnews.com/rss.xml",
+    "BBC World":           "http://feeds.bbci.co.uk/news/world/rss.xml",
+    "Reuters World":       "https://feeds.reuters.com/reuters/worldNews",
+}
+
+# GDELT — completely free, no key
+GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc?query=war+OR+conflict+OR+economy+OR+climate&mode=artlist&maxrecords=10&format=json"
+
+
+# ── Storage helpers ──────────────────────────────────────────
+
+def news_load():
+    if not os.path.exists(NEWS_STATE_PATH):
+        return {"generated": None, "stories": [], "edition": 0}
+    try:
+        with open(NEWS_STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {"generated": None, "stories": [], "edition": 0}
+
+
+def news_save(data):
+    os.makedirs("/mnt/data", exist_ok=True)
+    with open(NEWS_STATE_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ── Source: RSS fetch ────────────────────────────────────────
+
+def fetch_rss(name, url, max_items=5):
+    """Fetch and parse an RSS feed. Returns list of article dicts."""
+    import requests as req
+    try:
+        r = req.get(url, timeout=10, headers={"User-Agent": "ConsiliumNews/1.0"})
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content)
+        items = root.findall(".//item")
+        results = []
+        for item in items[:max_items]:
+            title = item.findtext("title", "").strip()
+            desc  = item.findtext("description", "").strip()
+            link  = item.findtext("link", "").strip()
+            pub   = item.findtext("pubDate", "").strip()
+            if title:
+                results.append({
+                    "source": name,
+                    "title": title,
+                    "description": re.sub(r"<[^>]+>", "", desc)[:300],
+                    "url": link,
+                    "published": pub
+                })
+        logging.info(f"[NEWS] RSS {name}: {len(results)} items")
+        return results
+    except Exception as e:
+        logging.warning(f"[NEWS] RSS fetch failed {name}: {e}")
+        return []
+
+
+def fetch_newsapi_global(max_items=10):
+    """Fetch top global headlines from NewsAPI."""
+    if not NEWSAPI_KEY:
+        return []
+    import requests as req
+    try:
+        r = req.get(
+            "https://newsapi.org/v2/top-headlines",
+            params={"language": "en", "pageSize": max_items, "apiKey": NEWSAPI_KEY},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return []
+        articles = r.json().get("articles", [])
+        return [
+            {
+                "source": a["source"]["name"],
+                "title": a["title"] or "",
+                "description": (a.get("description") or "")[:300],
+                "url": a.get("url", ""),
+                "published": (a.get("publishedAt") or "")[:10]
+            }
+            for a in articles if a.get("title")
+        ]
+    except Exception as e:
+        logging.warning(f"[NEWS] NewsAPI failed: {e}")
+        return []
+
+
+def fetch_gdelt(max_items=8):
+    """Fetch from GDELT — free, no key needed."""
+    import requests as req
+    try:
+        r = req.get(GDELT_URL, timeout=10)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        articles = data.get("articles", [])
+        return [
+            {
+                "source": a.get("domain", "GDELT"),
+                "title": a.get("title", ""),
+                "description": a.get("seendate", ""),
+                "url": a.get("url", ""),
+                "published": a.get("seendate", "")[:10]
+            }
+            for a in articles[:max_items] if a.get("title")
+        ]
+    except Exception as e:
+        logging.warning(f"[NEWS] GDELT failed: {e}")
+        return []
+
+
+def gather_all_sources():
+    """Gather articles from all sources. Returns combined list."""
+    all_articles = []
+
+    # Global aggregators
+    all_articles.extend(fetch_newsapi_global(max_items=10))
+    all_articles.extend(fetch_gdelt(max_items=8))
+
+    # Regional RSS
+    for name, url in NEWS_RSS_FEEDS.items():
+        all_articles.extend(fetch_rss(name, url, max_items=5))
+
+    logging.info(f"[NEWS] Total raw articles gathered: {len(all_articles)}")
+    return all_articles
+
+
+# ── Story selection via Grok ─────────────────────────────────
+
+def select_stories_with_grok(all_articles):
+    """
+    Ask Grok to identify the 3 most significant stories of the day
+    and return structured JSON with regional source coverage per story.
+    """
+    import requests as req
+
+    if not GROK_API_KEY:
+        logging.warning("[NEWS] No GROK_API_KEY — cannot select stories")
+        return []
+
+    # Build a compact article list for the prompt
+    article_lines = []
+    for i, a in enumerate(all_articles[:60]):
+        article_lines.append(f"{i}: [{a['source']}] {a['title']} — {a['description'][:100]}")
+    article_text = "\n".join(article_lines)
+
+    prompt = f"""You are the editorial director of Consilium News, an AI-deliberated news service.
+From the following articles gathered from global and regional sources today, identify the 3 most significant stories.
+
+For each story:
+1. Give it a concise editorial slug (3-5 words)
+2. Identify which articles from the list cover it (by index number)
+3. Note which regions/perspectives are represented
+4. Assign a category: Geopolitics / Economics / Technology / Climate / Society
+
+IMPORTANT: Prioritise stories that have coverage from MULTIPLE regional perspectives
+(e.g. both Western and Middle Eastern sources covering the same event).
+
+Return ONLY valid JSON in this exact format, no preamble:
+{{
+  "stories": [
+    {{
+      "slug": "Iran targets Gulf data centres",
+      "category": "Geopolitics",
+      "article_indices": [0, 3, 7, 12],
+      "regions": ["Middle East", "Western", "Israeli"],
+      "why": "First physical attacks on commercial AI infrastructure — paradigm shift"
+    }},
+    ...
+  ]
+}}
+
+Articles:
+{article_text}
+"""
+
+    try:
+        r = req.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": GROK_CHAT_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1000,
+                "temperature": 0.3
+            },
+            timeout=30
+        )
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        # Strip any markdown fences
+        raw = re.sub(r"^```json\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        data = json.loads(raw)
+        stories = data.get("stories", [])[:3]
+        # Attach actual article objects to each story
+        for story in stories:
+            indices = story.get("article_indices", [])
+            story["source_articles"] = [all_articles[i] for i in indices if i < len(all_articles)]
+        logging.info(f"[NEWS] Grok selected {len(stories)} stories")
+        return stories
+    except Exception as e:
+        logging.error(f"[NEWS] Story selection failed: {e}")
+        return []
+
+
+# ── Deliberation ─────────────────────────────────────────────
+
+DELIBERATION_PERSONAS = {
+    "deepseek": {
+        "name": "DeepSeek",
+        "color": "#178be0",
+        "lens": "analytical and structural — focus on systemic causes, historical precedent, and long-term consequences",
+        "model_key": "deepseek"
+    },
+    "grok": {
+        "name": "Grok",
+        "color": "#E24B4A",
+        "lens": "contrarian and incisive — challenge the consensus, find what mainstream coverage misses",
+        "model_key": "grok"
+    },
+    "claude": {
+        "name": "Claude",
+        "color": "#1D9E75",
+        "lens": "systemic and ethical — examine second-order effects, power dynamics, and what this means for people",
+        "model_key": "claude"
+    },
+    "gpt4o": {
+        "name": "GPT",
+        "color": "#888780",
+        "lens": "economic and practical — follow the money, assess market implications and real-world consequences",
+        "model_key": "gpt4o"
+    }
+}
+
+
+def call_model_for_deliberation(model_key, story_text, lens):
+    """Call a single model for its deliberation take. Returns a 2-3 sentence quote."""
+    import requests as req
+    cfg = CONSILIUM_MODELS.get(model_key)
+    if not cfg or not cfg["key"]:
+        return ""
+
+    prompt = f"""You are a senior analyst for Consilium News — an AI deliberative journalism service.
+
+Your analytical lens: {lens}
+
+Story briefing:
+{story_text}
+
+In 2-3 sentences, give your sharpest analytical observation about this story.
+Be specific, not generic. Reference concrete details from the briefing.
+Speak in first person. Do not start with "I think" or "In my view".
+Return only the quote text, nothing else."""
+
+    try:
+        if model_key == "claude":
+            r = req.post(
+                cfg["url"],
+                headers={
+                    "x-api-key": cfg["key"],
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": cfg["model"],
+                    "max_tokens": 200,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=20
+            )
+            return r.json()["content"][0]["text"].strip()
+        else:
+            r = req.post(
+                cfg["url"],
+                headers={"Authorization": f"Bearer {cfg['key']}", "Content-Type": "application/json"},
+                json={
+                    "model": cfg["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "temperature": 0.7
+                },
+                timeout=20
+            )
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logging.warning(f"[NEWS] Deliberation call failed for {model_key}: {e}")
+        return ""
+
+
+def deliberate_story(story):
+    """Run all four models on a story. Returns dict of voice -> quote."""
+    # Build story briefing from source articles
+    articles = story.get("source_articles", [])
+    briefing_lines = [f"Story: {story['slug']}", f"Category: {story['category']}", ""]
+    for a in articles[:6]:
+        briefing_lines.append(f"[{a['source']}] {a['title']}")
+        if a.get("description"):
+            briefing_lines.append(f"  {a['description'][:200]}")
+        briefing_lines.append("")
+    briefing = "\n".join(briefing_lines)
+
+    voices = {}
+    for key, persona in DELIBERATION_PERSONAS.items():
+        quote = call_model_for_deliberation(persona["model_key"], briefing, persona["lens"])
+        voices[key] = {
+            "name": persona["name"],
+            "color": persona["color"],
+            "quote": quote
+        }
+        logging.info(f"[NEWS] Deliberation {persona['name']}: {len(quote)} chars")
+
+    return voices
+
+
+# ── Article writing via Grok ─────────────────────────────────
+
+def write_article_with_grok(story, voices):
+    """Ask Grok to write the full article from the source briefing and deliberation."""
+    import requests as req
+    if not GROK_API_KEY:
+        return {}
+
+    articles = story.get("source_articles", [])
+    source_text = "\n".join([
+        f"[{a['source']}] {a['title']}\n{a.get('description','')}"
+        for a in articles[:6]
+    ])
+
+    voice_text = "\n".join([
+        f"{v['name']}: {v['quote']}"
+        for v in voices.values() if v.get("quote")
+    ])
+
+    prompt = f"""You are writing for Consilium News — a serious, distinctive AI-deliberated news service.
+Style: authoritative broadsheet. No tabloid language. No clickbait. Precise and considered.
+
+Story slug: {story['slug']}
+Category: {story['category']}
+
+Source coverage:
+{source_text}
+
+Analytical deliberation from our four AI voices:
+{voice_text}
+
+Write the article. Return ONLY valid JSON, no preamble:
+{{
+  "kicker": "3-5 word category label in sentence case",
+  "headline": "Main headline — sharp, specific, under 12 words",
+  "deck": "Standfirst — 1-2 sentences expanding on the headline, under 40 words",
+  "body": "3-4 paragraph article body. Factual, precise, draws on multiple regional perspectives. 150-200 words total.",
+  "image_prompt": "A photorealistic scene illustrating this story. Specific, visual, no text in image. 20-30 words.",
+  "sources_used": ["list of source names used"]
+}}"""
+
+    try:
+        r = req.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": GROK_CHAT_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 800,
+                "temperature": 0.4
+            },
+            timeout=30
+        )
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        raw = re.sub(r"^```json\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
+    except Exception as e:
+        logging.error(f"[NEWS] Article writing failed: {e}")
+        return {}
+
+
+# ── Image generation via Grok ────────────────────────────────
+
+def generate_image_with_grok(prompt_text):
+    """Generate a news image using grok-imagine-image. Returns URL or empty string."""
+    import requests as req
+    if not GROK_API_KEY:
+        return ""
+    try:
+        r = req.post(
+            "https://api.x.ai/v1/images/generations",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
+            json={"model": GROK_IMAGE_MODEL, "prompt": prompt_text, "n": 1},
+            timeout=30
+        )
+        url = r.json()["data"][0]["url"]
+        logging.info(f"[NEWS] Image generated: {url[:60]}...")
+        return url
+    except Exception as e:
+        logging.warning(f"[NEWS] Image generation failed: {e}")
+        return ""
+
+
+# ── Master pipeline ──────────────────────────────────────────
+
+def run_news_pipeline():
+    """
+    Full daily pipeline. Called by scheduler at 06:00 UTC.
+    Also callable via POST /news/generate (with CONSILIUM_KEY).
+    """
+    logging.info("[NEWS] ========== Daily pipeline starting ==========")
+    start = datetime.utcnow()
+
+    # 1. Gather sources
+    all_articles = gather_all_sources()
+    if not all_articles:
+        logging.error("[NEWS] No articles gathered — aborting")
+        return False
+
+    # 2. Select stories
+    selected = select_stories_with_grok(all_articles)
+    if not selected:
+        logging.error("[NEWS] No stories selected — aborting")
+        return False
+
+    # 3. Deliberate + write + illustrate each story
+    built_stories = []
+    for i, story in enumerate(selected[:3]):
+        logging.info(f"[NEWS] Processing story {i+1}: {story['slug']}")
+
+        # Deliberation
+        voices = deliberate_story(story)
+
+        # Writing
+        article = write_article_with_grok(story, voices)
+        if not article:
+            logging.warning(f"[NEWS] Article writing failed for story {i+1}")
+            continue
+
+        # Image generation
+        image_url = ""
+        if article.get("image_prompt"):
+            image_url = generate_image_with_grok(article["image_prompt"])
+
+        built_stories.append({
+            "slug":        story["slug"],
+            "category":    story["category"],
+            "regions":     story.get("regions", []),
+            "kicker":      article.get("kicker", story["category"]),
+            "headline":    article.get("headline", story["slug"]),
+            "deck":        article.get("deck", ""),
+            "body":        article.get("body", ""),
+            "image_url":   image_url,
+            "image_prompt": article.get("image_prompt", ""),
+            "voices":      voices,
+            "sources":     article.get("sources_used", []),
+        })
+
+    if not built_stories:
+        logging.error("[NEWS] No stories built — aborting save")
+        return False
+
+    # 4. Load existing state, bump edition
+    existing = news_load()
+    edition = existing.get("edition", 0) + 1
+
+    # 5. Save
+    state = {
+        "generated": start.isoformat() + "Z",
+        "edition":   edition,
+        "date":      start.strftime("%A, %-d %B %Y"),
+        "stories":   built_stories
+    }
+    news_save(state)
+
+    elapsed = (datetime.utcnow() - start).seconds
+    logging.info(f"[NEWS] Pipeline complete. Edition {edition}. {len(built_stories)} stories. {elapsed}s elapsed.")
+    return True
+
+
+# ── Scheduler thread ─────────────────────────────────────────
+
+def news_scheduler_loop():
+    """Run once daily at 06:00 UTC."""
+    logging.info("[NEWS] Scheduler started — will run at 06:00 UTC daily")
+    while True:
+        now = datetime.utcnow()
+        # Calculate seconds until next 06:00 UTC
+        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        logging.info(f"[NEWS] Next run in {int(wait_seconds/3600)}h {int((wait_seconds%3600)/60)}m")
+        time.sleep(wait_seconds)
+        try:
+            run_news_pipeline()
+        except Exception as e:
+            logging.error(f"[NEWS] Pipeline exception: {e}")
+
+
+# ── Flask routes ─────────────────────────────────────────────
+
+@flask_app.route("/news", methods=["GET"])
+def news_page():
+    """Serve the Consilium News HTML page."""
+    state = news_load()
+    stories = state.get("stories", [])
+    date_str = state.get("date", "")
+    edition = state.get("edition", 1)
+    generated = state.get("generated", "")
+
+    if not stories:
+        return """<!DOCTYPE html><html><head><title>News @ Consilium</title></head>
+<body style="font-family:serif;max-width:700px;margin:4rem auto;padding:0 2rem;">
+<h1 style="font-style:italic">News @ Consilium</h1>
+<p>First edition generating at 06:00 UTC. Check back soon.</p>
+<p><a href="/news/generate" style="color:#E24B4A">Trigger generation (key required)</a></p>
+</body></html>""", 200
+
+    lead = stories[0]
+    rest = stories[1:]
+
+    # Build voice panels for lead story
+    def voice_panels(voices):
+        html = ""
+        for v in voices.values():
+            if v.get("quote"):
+                html += f"""<div style="padding:0.75rem;border:0.5px solid #ccc;border-radius:2px;background:#f9f9f9;">
+<div style="font-family:monospace;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:{v['color']};margin-bottom:0.4rem;">{v['name']}</div>
+<div style="font-size:12px;font-style:italic;line-height:1.5;color:#444;">{v['quote']}</div>
+</div>"""
+        return html
+
+    # Build sidebar stories
+    def sidebar_items(stories):
+        html = ""
+        for s in stories:
+            html += f"""<div style="margin-bottom:1rem;padding-bottom:1rem;border-bottom:0.5px solid #ddd;">
+<div style="font-family:monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.3rem;">{s.get('kicker','')}</div>
+<div style="font-family:'Playfair Display',Georgia,serif;font-size:14px;font-weight:700;line-height:1.3;margin-bottom:0.3rem;">{s.get('headline','')}</div>
+<div style="font-size:12px;color:#666;line-height:1.4;">{s.get('deck','')}</div>
+</div>"""
+        return html
+
+    lead_img = f'<img src="{lead["image_url"]}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:2px;margin-bottom:0.9rem;">' if lead.get("image_url") else '<div style="width:100%;aspect-ratio:16/9;background:#f0f0f0;border-radius:2px;margin-bottom:0.9rem;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:10px;color:#999;">Image pending</div>'
+
+    body_paras = "".join(
+        f"<p style='margin:0 0 0.8rem;'>{p.strip()}</p>"
+        for p in lead.get("body","").split("\n") if p.strip()
+    )
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>News @ Consilium — Edition {edition}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,400&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Source Serif 4',Georgia,serif;color:#1a1a1a;background:#fff;max-width:940px;margin:0 auto;padding:0 1.5rem 3rem}}
+a{{color:inherit;text-decoration:none}}
+</style>
+</head>
+<body>
+
+<!-- Masthead -->
+<div style="border-top:4px solid #1a1a1a;border-bottom:0.5px solid #ddd;padding:1.2rem 0 1rem;margin-bottom:0.5rem;">
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.5rem;">
+    <div style="font-family:'Playfair Display',Georgia,serif;font-size:42px;font-weight:900;letter-spacing:-1px;line-height:1;">News <em style="font-weight:400">@</em> Consilium</div>
+    <div style="font-family:'Space Mono',monospace;font-size:10px;color:#666;text-align:right;line-height:1.6;">{date_str}<br>Morning Edition · Vol. 1 No. {edition}<br>consilium-d1fw.onrender.com</div>
+  </div>
+  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;border-top:0.5px solid #ddd;padding-top:0.5rem;">Deliberated by four minds &nbsp;·&nbsp; DeepSeek &nbsp;·&nbsp; Grok &nbsp;·&nbsp; Claude &nbsp;·&nbsp; GPT &nbsp;·&nbsp; No editorial bias &nbsp;·&nbsp; No agenda</div>
+</div>
+
+<!-- Edition bar -->
+<div style="background:#1a1a1a;color:#fff;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;padding:5px 12px;display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;">
+  <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#E24B4A;margin-right:6px;"></span>Daily broadcast — generated {generated[:16].replace('T',' ')} UTC</span>
+  <span>{len(stories)} stories deliberated · 4 AI voices</span>
+</div>
+
+<!-- Grid -->
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-top:0.5px solid #ddd;">
+
+  <!-- Lead story -->
+  <div style="grid-column:1/3;padding:1.25rem 1.25rem 1.25rem 0;border-right:0.5px solid #ddd;border-bottom:0.5px solid #ddd;">
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.4rem;">{lead.get('kicker','Lead story')}</div>
+    <div style="font-family:'Playfair Display',Georgia,serif;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.3px;margin-bottom:0.6rem;">{lead.get('headline','')}</div>
+    {lead_img}
+    <div style="font-size:14px;font-weight:300;line-height:1.55;color:#555;margin-bottom:0.75rem;">{lead.get('deck','')}</div>
+    <div style="font-size:14px;font-weight:300;line-height:1.7;">{body_paras}</div>
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.08em;color:#999;text-transform:uppercase;margin-top:0.75rem;padding-top:0.5rem;border-top:0.5px solid #ddd;">
+      Consilium deliberation · {generated[:10]} · Sources: {', '.join(lead.get('sources',[])[:3])}
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div style="padding:1.25rem 0 1.25rem 1.25rem;">
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.75rem;">Also today</div>
+    {sidebar_items(rest)}
+    <div style="margin-top:1rem;padding-top:1rem;border-top:0.5px solid #ddd;">
+      <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;line-height:1.6;">Regional sources<br>{'<br>'.join(list(NEWS_RSS_FEEDS.keys())[:4])}</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Deliberation panel -->
+<div style="margin-top:2rem;border-top:2px solid #1a1a1a;padding-top:1.25rem;">
+  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;margin-bottom:1rem;">The deliberation — four voices on the lead story</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+    {voice_panels(lead.get('voices',{{}}))}
+  </div>
+</div>
+
+<!-- Footer -->
+<div style="margin-top:2rem;padding-top:0.75rem;border-top:2px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center;">
+  <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;letter-spacing:0.08em;text-transform:uppercase;line-height:1.6;">
+    Generated autonomously · No human editorial<br>
+    Consilium deliberative engine · Robertsbridge, East Sussex<br>
+    consilium-d1fw.onrender.com/news
+  </div>
+  <div style="font-family:'Playfair Display',Georgia,serif;font-size:16px;font-weight:700;font-style:italic;color:#999;">News @ Consilium</div>
+</div>
+
+</body>
+</html>"""
+
+    return page, 200
+
+
+@flask_app.route("/news/state", methods=["GET"])
+def news_state_endpoint():
+    """Return raw news state JSON."""
+    return jsonify(news_load())
+
+
+@flask_app.route("/news/generate", methods=["POST"])
+def news_generate_endpoint():
+    """Manually trigger pipeline. Requires CONSILIUM_KEY."""
+    if not consilium_require_key():
+        return jsonify({"error": "unauthorized"}), 403
+    thread = threading.Thread(target=run_news_pipeline, daemon=True)
+    thread.start()
+    return jsonify({"status": "pipeline started", "check": "/news/state"})
+
+
+# Add news scheduler to startup — called in __main__ block
+# news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
+# news_thread.start()
