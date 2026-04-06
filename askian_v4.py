@@ -3737,15 +3737,12 @@ POLL_INTERVAL = 30  # seconds between checks
 
 if __name__ == "__main__":
     logging.info("=" * 50)
-    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + Curiosity Engine + Consilium News) [X Monitor suspended Apr 2026]")
+    logging.info("AskIan v4 started (continuous mode + Consilium + Enquiring Mind + Curiosity Engine) [X Monitor suspended Apr 2026]")
     logging.info(f"Polling every {POLL_INTERVAL} seconds")
     logging.info("Personas available:")
     for key, p in PERSONAS.items():
         logging.info(f"  {p['name']:25s} → {p['email']}")
     logging.info("=" * 50)
-
-    news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
-    news_thread.start()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -3767,7 +3764,7 @@ if __name__ == "__main__":
         logging.info("AskIan v4 stopped by user (Ctrl+C)")
 
 # ============================================================
-# CONSILIUM NEWS MODULE — appended
+# CONSILIUM NEWS MODULE
 # ============================================================
 
 # ============================================================
@@ -4440,6 +4437,7 @@ def news_generate_endpoint():
     return jsonify({"status": "pipeline started", "check": "/news/state"})
 
 
-# Add news scheduler to startup — called in __main__ block
-# news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
-# news_thread.start()
+# Self-start the news scheduler when module is loaded
+_news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
+_news_thread.start()
+logging.info("[NEWS] Scheduler thread started — daily broadcast at 06:00 UTC")
