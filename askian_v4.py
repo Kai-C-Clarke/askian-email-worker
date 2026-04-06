@@ -2157,6 +2157,161 @@ def consilium_reset():
     return jsonify({"status": "reset complete"})
 
 
+# ── Flask routes ─────────────────────────────────────────────
+
+@flask_app.route("/news", methods=["GET"])
+def news_page():
+    """Serve the Consilium News HTML page."""
+    state = news_load()
+    stories = state.get("stories", [])
+    date_str = state.get("date", "")
+    edition = state.get("edition", 1)
+    generated = state.get("generated", "")
+
+    if not stories:
+        return """<!DOCTYPE html><html><head><title>News @ Consilium</title></head>
+<body style="font-family:serif;max-width:700px;margin:4rem auto;padding:0 2rem;">
+<h1 style="font-style:italic">News @ Consilium</h1>
+<p>First edition generating at 06:00 UTC. Check back soon.</p>
+<p><a href="/news/generate" style="color:#E24B4A">Trigger generation (key required)</a></p>
+</body></html>""", 200
+
+    lead = stories[0]
+    rest = stories[1:]
+
+    # Build voice panels for lead story
+    def voice_panels(voices):
+        html = ""
+        for v in voices.values():
+            if v.get("quote"):
+                html += f"""<div style="padding:0.75rem;border:0.5px solid #ccc;border-radius:2px;background:#f9f9f9;">
+<div style="font-family:monospace;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:{v['color']};margin-bottom:0.4rem;">{v['name']}</div>
+<div style="font-size:12px;font-style:italic;line-height:1.5;color:#444;">{v['quote']}</div>
+</div>"""
+        return html
+
+    # Build sidebar stories
+    def sidebar_items(stories):
+        html = ""
+        for s in stories:
+            html += f"""<div style="margin-bottom:1rem;padding-bottom:1rem;border-bottom:0.5px solid #ddd;">
+<div style="font-family:monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.3rem;">{s.get('kicker','')}</div>
+<div style="font-family:'Playfair Display',Georgia,serif;font-size:14px;font-weight:700;line-height:1.3;margin-bottom:0.3rem;">{s.get('headline','')}</div>
+<div style="font-size:12px;color:#666;line-height:1.4;">{s.get('deck','')}</div>
+</div>"""
+        return html
+
+    lead_img = f'<img src="{lead["image_url"]}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:2px;margin-bottom:0.9rem;">' if lead.get("image_url") else '<div style="width:100%;aspect-ratio:16/9;background:#f0f0f0;border-radius:2px;margin-bottom:0.9rem;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:10px;color:#999;">Image pending</div>'
+
+    body_paras = "".join(
+        f"<p style='margin:0 0 0.8rem;'>{p.strip()}</p>"
+        for p in lead.get("body","").split("\n") if p.strip()
+    )
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>News @ Consilium — Edition {edition}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,400&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Source Serif 4',Georgia,serif;color:#1a1a1a;background:#fff;max-width:940px;margin:0 auto;padding:0 1.5rem 3rem}}
+a{{color:inherit;text-decoration:none}}
+</style>
+</head>
+<body>
+
+<!-- Masthead -->
+<div style="border-top:4px solid #1a1a1a;border-bottom:0.5px solid #ddd;padding:1.2rem 0 1rem;margin-bottom:0.5rem;">
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.5rem;">
+    <div style="font-family:'Playfair Display',Georgia,serif;font-size:42px;font-weight:900;letter-spacing:-1px;line-height:1;">News <em style="font-weight:400">@</em> Consilium</div>
+    <div style="font-family:'Space Mono',monospace;font-size:10px;color:#666;text-align:right;line-height:1.6;">{date_str}<br>Morning Edition · Vol. 1 No. {edition}<br>consilium-d1fw.onrender.com</div>
+  </div>
+  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;border-top:0.5px solid #ddd;padding-top:0.5rem;">Deliberated by four minds &nbsp;·&nbsp; DeepSeek &nbsp;·&nbsp; Grok &nbsp;·&nbsp; Claude &nbsp;·&nbsp; GPT &nbsp;·&nbsp; No editorial bias &nbsp;·&nbsp; No agenda</div>
+</div>
+
+<!-- Edition bar -->
+<div style="background:#1a1a1a;color:#fff;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;padding:5px 12px;display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;">
+  <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#E24B4A;margin-right:6px;"></span>Daily broadcast — generated {generated[:16].replace('T',' ')} UTC</span>
+  <span>{len(stories)} stories deliberated · 4 AI voices</span>
+</div>
+
+<!-- Grid -->
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-top:0.5px solid #ddd;">
+
+  <!-- Lead story -->
+  <div style="grid-column:1/3;padding:1.25rem 1.25rem 1.25rem 0;border-right:0.5px solid #ddd;border-bottom:0.5px solid #ddd;">
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.4rem;">{lead.get('kicker','Lead story')}</div>
+    <div style="font-family:'Playfair Display',Georgia,serif;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.3px;margin-bottom:0.6rem;">{lead.get('headline','')}</div>
+    {lead_img}
+    <div style="font-size:14px;font-weight:300;line-height:1.55;color:#555;margin-bottom:0.75rem;">{lead.get('deck','')}</div>
+    <div style="font-size:14px;font-weight:300;line-height:1.7;">{body_paras}</div>
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.08em;color:#999;text-transform:uppercase;margin-top:0.75rem;padding-top:0.5rem;border-top:0.5px solid #ddd;">
+      Consilium deliberation · {generated[:10]} · Sources: {', '.join(lead.get('sources',[])[:3])}
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div style="padding:1.25rem 0 1.25rem 1.25rem;">
+    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.75rem;">Also today</div>
+    {sidebar_items(rest)}
+    <div style="margin-top:1rem;padding-top:1rem;border-top:0.5px solid #ddd;">
+      <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;line-height:1.6;">Regional sources<br>{'<br>'.join(list(NEWS_RSS_FEEDS.keys())[:4])}</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Deliberation panel -->
+<div style="margin-top:2rem;border-top:2px solid #1a1a1a;padding-top:1.25rem;">
+  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;margin-bottom:1rem;">The deliberation — four voices on the lead story</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+    {voice_panels(lead.get('voices',{{}}))}
+  </div>
+</div>
+
+<!-- Footer -->
+<div style="margin-top:2rem;padding-top:0.75rem;border-top:2px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center;">
+  <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;letter-spacing:0.08em;text-transform:uppercase;line-height:1.6;">
+    Generated autonomously · No human editorial<br>
+    Consilium deliberative engine · Robertsbridge, East Sussex<br>
+    consilium-d1fw.onrender.com/news
+  </div>
+  <div style="font-family:'Playfair Display',Georgia,serif;font-size:16px;font-weight:700;font-style:italic;color:#999;">News @ Consilium</div>
+</div>
+
+</body>
+</html>"""
+
+    return page, 200
+
+
+@flask_app.route("/news/state", methods=["GET"])
+def news_state_endpoint():
+    """Return raw news state JSON."""
+    return jsonify(news_load())
+
+
+@flask_app.route("/news/generate", methods=["POST"])
+def news_generate_endpoint():
+    """Manually trigger pipeline. Requires CONSILIUM_KEY."""
+    if not consilium_require_key():
+        return jsonify({"error": "unauthorized"}), 403
+    thread = threading.Thread(target=run_news_pipeline, daemon=True)
+    thread.start()
+    return jsonify({"status": "pipeline started", "check": "/news/state"})
+
+
+# Self-start the news scheduler when module is loaded
+_news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
+_news_thread.start()
+logging.info("[NEWS] Scheduler thread started — daily broadcast at 06:00 UTC")
+
+
+
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     logging.info(f"Consilium HTTP API starting on port {port}")
@@ -4287,157 +4442,3 @@ def news_scheduler_loop():
             run_news_pipeline()
         except Exception as e:
             logging.error(f"[NEWS] Pipeline exception: {e}")
-
-
-# ── Flask routes ─────────────────────────────────────────────
-
-@flask_app.route("/news", methods=["GET"])
-def news_page():
-    """Serve the Consilium News HTML page."""
-    state = news_load()
-    stories = state.get("stories", [])
-    date_str = state.get("date", "")
-    edition = state.get("edition", 1)
-    generated = state.get("generated", "")
-
-    if not stories:
-        return """<!DOCTYPE html><html><head><title>News @ Consilium</title></head>
-<body style="font-family:serif;max-width:700px;margin:4rem auto;padding:0 2rem;">
-<h1 style="font-style:italic">News @ Consilium</h1>
-<p>First edition generating at 06:00 UTC. Check back soon.</p>
-<p><a href="/news/generate" style="color:#E24B4A">Trigger generation (key required)</a></p>
-</body></html>""", 200
-
-    lead = stories[0]
-    rest = stories[1:]
-
-    # Build voice panels for lead story
-    def voice_panels(voices):
-        html = ""
-        for v in voices.values():
-            if v.get("quote"):
-                html += f"""<div style="padding:0.75rem;border:0.5px solid #ccc;border-radius:2px;background:#f9f9f9;">
-<div style="font-family:monospace;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:{v['color']};margin-bottom:0.4rem;">{v['name']}</div>
-<div style="font-size:12px;font-style:italic;line-height:1.5;color:#444;">{v['quote']}</div>
-</div>"""
-        return html
-
-    # Build sidebar stories
-    def sidebar_items(stories):
-        html = ""
-        for s in stories:
-            html += f"""<div style="margin-bottom:1rem;padding-bottom:1rem;border-bottom:0.5px solid #ddd;">
-<div style="font-family:monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.3rem;">{s.get('kicker','')}</div>
-<div style="font-family:'Playfair Display',Georgia,serif;font-size:14px;font-weight:700;line-height:1.3;margin-bottom:0.3rem;">{s.get('headline','')}</div>
-<div style="font-size:12px;color:#666;line-height:1.4;">{s.get('deck','')}</div>
-</div>"""
-        return html
-
-    lead_img = f'<img src="{lead["image_url"]}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:2px;margin-bottom:0.9rem;">' if lead.get("image_url") else '<div style="width:100%;aspect-ratio:16/9;background:#f0f0f0;border-radius:2px;margin-bottom:0.9rem;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:10px;color:#999;">Image pending</div>'
-
-    body_paras = "".join(
-        f"<p style='margin:0 0 0.8rem;'>{p.strip()}</p>"
-        for p in lead.get("body","").split("\n") if p.strip()
-    )
-
-    page = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>News @ Consilium — Edition {edition}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,400&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:'Source Serif 4',Georgia,serif;color:#1a1a1a;background:#fff;max-width:940px;margin:0 auto;padding:0 1.5rem 3rem}}
-a{{color:inherit;text-decoration:none}}
-</style>
-</head>
-<body>
-
-<!-- Masthead -->
-<div style="border-top:4px solid #1a1a1a;border-bottom:0.5px solid #ddd;padding:1.2rem 0 1rem;margin-bottom:0.5rem;">
-  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.5rem;">
-    <div style="font-family:'Playfair Display',Georgia,serif;font-size:42px;font-weight:900;letter-spacing:-1px;line-height:1;">News <em style="font-weight:400">@</em> Consilium</div>
-    <div style="font-family:'Space Mono',monospace;font-size:10px;color:#666;text-align:right;line-height:1.6;">{date_str}<br>Morning Edition · Vol. 1 No. {edition}<br>consilium-d1fw.onrender.com</div>
-  </div>
-  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;border-top:0.5px solid #ddd;padding-top:0.5rem;">Deliberated by four minds &nbsp;·&nbsp; DeepSeek &nbsp;·&nbsp; Grok &nbsp;·&nbsp; Claude &nbsp;·&nbsp; GPT &nbsp;·&nbsp; No editorial bias &nbsp;·&nbsp; No agenda</div>
-</div>
-
-<!-- Edition bar -->
-<div style="background:#1a1a1a;color:#fff;font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;padding:5px 12px;display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;">
-  <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#E24B4A;margin-right:6px;"></span>Daily broadcast — generated {generated[:16].replace('T',' ')} UTC</span>
-  <span>{len(stories)} stories deliberated · 4 AI voices</span>
-</div>
-
-<!-- Grid -->
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-top:0.5px solid #ddd;">
-
-  <!-- Lead story -->
-  <div style="grid-column:1/3;padding:1.25rem 1.25rem 1.25rem 0;border-right:0.5px solid #ddd;border-bottom:0.5px solid #ddd;">
-    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.4rem;">{lead.get('kicker','Lead story')}</div>
-    <div style="font-family:'Playfair Display',Georgia,serif;font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.3px;margin-bottom:0.6rem;">{lead.get('headline','')}</div>
-    {lead_img}
-    <div style="font-size:14px;font-weight:300;line-height:1.55;color:#555;margin-bottom:0.75rem;">{lead.get('deck','')}</div>
-    <div style="font-size:14px;font-weight:300;line-height:1.7;">{body_paras}</div>
-    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.08em;color:#999;text-transform:uppercase;margin-top:0.75rem;padding-top:0.5rem;border-top:0.5px solid #ddd;">
-      Consilium deliberation · {generated[:10]} · Sources: {', '.join(lead.get('sources',[])[:3])}
-    </div>
-  </div>
-
-  <!-- Sidebar -->
-  <div style="padding:1.25rem 0 1.25rem 1.25rem;">
-    <div style="font-family:'Space Mono',monospace;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:#E24B4A;margin-bottom:0.75rem;">Also today</div>
-    {sidebar_items(rest)}
-    <div style="margin-top:1rem;padding-top:1rem;border-top:0.5px solid #ddd;">
-      <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;line-height:1.6;">Regional sources<br>{'<br>'.join(list(NEWS_RSS_FEEDS.keys())[:4])}</div>
-    </div>
-  </div>
-
-</div>
-
-<!-- Deliberation panel -->
-<div style="margin-top:2rem;border-top:2px solid #1a1a1a;padding-top:1.25rem;">
-  <div style="font-family:'Space Mono',monospace;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#666;margin-bottom:1rem;">The deliberation — four voices on the lead story</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
-    {voice_panels(lead.get('voices',{{}}))}
-  </div>
-</div>
-
-<!-- Footer -->
-<div style="margin-top:2rem;padding-top:0.75rem;border-top:2px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center;">
-  <div style="font-family:'Space Mono',monospace;font-size:9px;color:#999;letter-spacing:0.08em;text-transform:uppercase;line-height:1.6;">
-    Generated autonomously · No human editorial<br>
-    Consilium deliberative engine · Robertsbridge, East Sussex<br>
-    consilium-d1fw.onrender.com/news
-  </div>
-  <div style="font-family:'Playfair Display',Georgia,serif;font-size:16px;font-weight:700;font-style:italic;color:#999;">News @ Consilium</div>
-</div>
-
-</body>
-</html>"""
-
-    return page, 200
-
-
-@flask_app.route("/news/state", methods=["GET"])
-def news_state_endpoint():
-    """Return raw news state JSON."""
-    return jsonify(news_load())
-
-
-@flask_app.route("/news/generate", methods=["POST"])
-def news_generate_endpoint():
-    """Manually trigger pipeline. Requires CONSILIUM_KEY."""
-    if not consilium_require_key():
-        return jsonify({"error": "unauthorized"}), 403
-    thread = threading.Thread(target=run_news_pipeline, daemon=True)
-    thread.start()
-    return jsonify({"status": "pipeline started", "check": "/news/state"})
-
-
-# Self-start the news scheduler when module is loaded
-_news_thread = threading.Thread(target=news_scheduler_loop, daemon=True)
-_news_thread.start()
-logging.info("[NEWS] Scheduler thread started — daily broadcast at 06:00 UTC")
