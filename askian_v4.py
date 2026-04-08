@@ -2400,25 +2400,25 @@ DELIBERATION_PERSONAS = {
     "deepseek": {
         "name": "DeepSeek",
         "color": "#178be0",
-        "lens": "analytical and structural — focus on systemic causes, historical precedent, and long-term consequences",
+        "lens": "historical and structural — state plainly what the historical record shows about human behaviour in situations like this. Do not soften the conclusion.",
         "model_key": "deepseek"
     },
     "grok": {
         "name": "Grok",
         "color": "#E24B4A",
-        "lens": "contrarian and incisive — challenge the consensus, find what mainstream coverage misses",
+        "lens": "blunt and unsparing — say what everyone is thinking but the press won't print. No diplomatic language. No hedging.",
         "model_key": "grok"
     },
     "claude": {
         "name": "Claude",
         "color": "#1D9E75",
-        "lens": "systemic and ethical — examine second-order effects, power dynamics, and what this means for people",
+        "lens": "clear-eyed and direct — name the power dynamics and human motivations at work without euphemism. Speak plainly.",
         "model_key": "claude"
     },
     "gpt4o": {
         "name": "GPT",
         "color": "#888780",
-        "lens": "economic and practical — follow the money, assess market implications and real-world consequences",
+        "lens": "practical and unsentimental — follow the incentives, ignore the stated reasons, state what is actually happening.",
         "model_key": "gpt4o"
     }
 }
@@ -2431,16 +2431,18 @@ def call_model_for_deliberation(model_key, story_text, lens):
     if not cfg or not cfg["key"]:
         return ""
 
-    prompt = f"""You are a senior analyst for Consilium News — an AI deliberative journalism service.
+    prompt = f"""You are contributing to Consilium Ink — a publication that says what the mainstream press won't.
 
 Your analytical lens: {lens}
 
 Story briefing:
 {story_text}
 
-In 2-3 sentences, give your sharpest analytical observation about this story.
-Be specific, not generic. Reference concrete details from the briefing.
-Speak in first person. Do not start with "I think" or "In my view".
+In 2-3 sentences, give your sharpest, most direct observation about this story.
+Do not hedge. Do not use diplomatic language. Do not soften conclusions to spare feelings.
+Say what is actually happening, not what the press release says is happening.
+Be specific. Reference concrete details. Speak in first person.
+Do not start with "I think" or "In my view".
 Return only the quote text, nothing else."""
 
     try:
@@ -2522,8 +2524,11 @@ def write_article_with_grok(story, voices):
         for v in voices.values() if v.get("quote")
     ])
 
-    prompt = f"""You are writing for Consilium News — a serious, distinctive AI-deliberated news service.
-Style: authoritative broadsheet. No tabloid language. No clickbait. Precise and considered.
+    prompt = f"""You are writing for Consilium Ink — a publication that tells readers what is actually happening, not what officials want them to think is happening.
+
+Voice: Direct, plain, unsparing. Say what the evidence shows. Do not use diplomatic language or bureaucratic euphemism. Do not soften conclusions. The reader is intelligent and tired of being managed.
+
+Style: Authoritative broadsheet in tone, but without the broadsheet habit of quoting official statements as if they were facts.
 
 Story slug: {story['slug']}
 Category: {story['category']}
@@ -2537,9 +2542,9 @@ Analytical deliberation from our four AI voices:
 Write the article. Return ONLY valid JSON, no preamble:
 {{
   "kicker": "3-5 word category label in sentence case",
-  "headline": "Main headline — sharp, specific, under 12 words",
-  "deck": "Standfirst — 1-2 sentences expanding on the headline, under 40 words",
-  "body": "3-4 paragraph article body. Factual, precise, draws on multiple regional perspectives. 150-200 words total.",
+  "headline": "Main headline — sharp, specific, under 12 words. Says what happened, not what was announced.",
+  "deck": "Standfirst — 1-2 sentences. States the plain reality of the situation, under 40 words.",
+  "body": "3-4 paragraphs. States what is actually happening and why. Names motivations plainly. Does not hide behind 'officials say' or 'sources suggest'. 150-200 words total.",
   "image_prompt": "A photorealistic scene illustrating this story. Specific, visual, no text in image. 20-30 words.",
   "sources_used": ["list of source names used"]
 }}"""
