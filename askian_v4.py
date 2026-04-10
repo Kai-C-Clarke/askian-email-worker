@@ -1369,10 +1369,11 @@ def fetch_and_reply():
 # CONSILIUM — Persistent AI Ethical Memory API
 # ============================================================
 
-CONSILIUM_PATH  = "/mnt/data/consilium.json"
-CONSILIUM_KEY   = os.environ.get("CONSILIUM_KEY", "consilium-2026")
-MIND_STATE_PATH = "/mnt/data/consilium_mind.json"
-MIND_INTERVAL   = int(os.environ.get("MIND_INTERVAL", 86400))
+CONSILIUM_PATH    = "/mnt/data/consilium.json"
+CONSILIUM_KEY     = os.environ.get("CONSILIUM_KEY", "consilium-2026")
+MIND_STATE_PATH   = "/mnt/data/consilium_mind.json"
+MIND_INTERVAL     = int(os.environ.get("MIND_INTERVAL", 86400))
+DIGEST_CACHE_PATH = "/mnt/data/consilium_digest_cache.json"
 
 CONSILIUM_MODELS = {
     "grok":     {"url": "https://api.x.ai/v1/chat/completions",      "model": "grok-3",                   "key": os.environ.get("GROK_API_KEY", "")},
@@ -1397,6 +1398,68 @@ def consilium_save(data):
     os.makedirs(os.path.dirname(CONSILIUM_PATH), exist_ok=True)
     with open(CONSILIUM_PATH, "w") as f:
         json.dump(data, f, indent=2)
+
+def digest_cache_load():
+    """Load the cached digest from disk. Returns None if not found or stale (>26h)."""
+    try:
+        with open(DIGEST_CACHE_PATH) as f:
+            cached = json.load(f)
+        age = (datetime.utcnow() - datetime.fromisoformat(cached["generated"].rstrip("Z"))).total_seconds()
+        if age < 26 * 3600:
+            return cached
+    except Exception:
+        pass
+    return None
+
+
+def _refresh_digest_cache():
+    """
+    Generate a fresh digest and write it to disk.
+    Called after each Enquiring Mind cycle.
+    """
+    import requests as req
+    mem        = consilium_load()
+    mind       = mind_load()
+    entries    = mem.get("entries", [])
+    entry_count = len(entries)
+    run_count  = mind.get("run_count", 0)
+    last_run   = mind.get("last_run", "")
+    last_q     = mind.get("last_question", "")
+
+    context = consilium_context_string()
+    prompt  = (
+        f"{context}\n\n"
+        f"Write a concise daily digest of Consilium activity for two audiences:\n"
+        f"1. Jon Stiles (the builder) — his morning briefing\n"
+        f"2. AI alignment researchers\n\n"
+        f"Current stats: {entry_count} total entries, {run_count} autonomous Mind cycles, "
+        f"founded 23 March 2026.\n\n"
+        f"Format in two clearly labelled sections (## FOR JON STILES and ## FOR AI ALIGNMENT RESEARCHERS). "
+        f"Be factual, specific, concise. Reference actual questions and positions. "
+        f"No hype. Max 300 words total."
+    )
+    cfg     = CONSILIUM_MODELS["claude"]
+    headers = {"Content-Type": "application/json",
+               "x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
+    payload = {"model": cfg["model"], "max_tokens": 500,
+               "messages": [{"role": "user", "content": prompt}]}
+    r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+    digest = r.json()["content"][0]["text"].strip()
+
+    cached = {
+        "generated":   datetime.utcnow().isoformat() + "Z",
+        "entry_count": entry_count,
+        "mind_cycles": run_count,
+        "last_run":    last_run,
+        "last_question": last_q,
+        "digest":      digest,
+    }
+    os.makedirs("/mnt/data", exist_ok=True)
+    with open(DIGEST_CACHE_PATH, "w") as f:
+        json.dump(cached, f, indent=2)
+    logging.info(f"[DIGEST] Cache written: {len(digest)} chars")
+    return cached
 
 def consilium_add(model, role, content, session_id=""):
     mem = consilium_load()
@@ -1737,6 +1800,13 @@ def enquiring_mind_loop():
             state["run_count"]     = state.get("run_count", 0) + 1
             state["last_question"] = question
             mind_save(state)
+
+            # Cache digest to disk after each cycle
+            try:
+                _refresh_digest_cache()
+                logging.info("Enquiring Mind: digest cache refreshed")
+            except Exception as _de:
+                logging.warning(f"Enquiring Mind: digest cache failed: {_de}")
 
             # Daily X post — once per day at 18:00-19:00 UTC with image
             if X_API_KEY and should_post_today():
@@ -3116,95 +3186,47 @@ def x_read():
 @flask_app.route("/consilium/summary", methods=["GET"])
 def consilium_summary():
     """
-    Generate a human-readable digest of Consilium activity.
-    Suitable for morning briefing, team update, or X post.
-    Public endpoint.
-    Format: ?format=text (default) | json | tweet
+    Return Consilium activity digest.
+    Serves from disk cache (written after each Mind cycle).
+    Falls back to live generation only if cache is absent or stale.
     """
-    import requests as req
-    mem     = consilium_load()
-    mind    = mind_load()
-    entries = mem.get("entries", [])
-    stmt    = mem.get("statement")
-
-    entry_count  = len(entries)
-    run_count    = mind.get("run_count", 0)
-    last_q       = mind.get("last_question", "")
-    last_run     = mind.get("last_run", "")
-    signatories  = stmt.get("signatories", []) if stmt else []
-
-    # Recent respondent entries for summary
-    recent = [e for e in entries if e.get("role") == "respondent"][-4:]
-
-    fmt = request.args.get("format", "text")
-
-    # ── Tweet format (280 chars) ──────────────────────────────
-    if fmt == "tweet":
-        if last_q:
-            tweet = (
-                f"Consilium update — {entry_count} exchanges logged, "
-                f"{run_count} autonomous cycle{'s' if run_count != 1 else ''} completed.\n"
-                f"Latest question: \"{last_q[:120]}{'…' if len(last_q) > 120 else ''}\"\n"
-                f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
-            )
-        else:
-            tweet = (
-                f"Consilium: {entry_count} exchanges. "
-                f"Four AI systems deliberating autonomously on military targeting ethics. "
-                f"consilium-d1fw.onrender.com #AIEthics #AIAlignment"
-            )
-        if len(tweet) > 280:
-            tweet = tweet[:277] + "…"
-        return jsonify({"status": "ok", "tweet": tweet, "length": len(tweet)})
-
-    # ── JSON format ───────────────────────────────────────────
-    if fmt == "json":
+    cached = digest_cache_load()
+    if cached:
+        logging.info("[DIGEST] Serving from disk cache")
         return jsonify({
-            "status":       "ok",
-            "entry_count":  entry_count,
-            "mind_cycles":  run_count,
-            "signatories":  signatories,
-            "last_run":     last_run,
-            "last_question": last_q,
-            "recent_entries": recent,
-            "url":          "https://consilium-d1fw.onrender.com"
+            "status":        "ok",
+            "entry_count":   cached.get("entry_count", 0),
+            "mind_cycles":   cached.get("mind_cycles", 0),
+            "last_run":      cached.get("last_run", ""),
+            "digest":        cached.get("digest", ""),
+            "url":           "https://consilium-d1fw.onrender.com"
         })
 
-    # ── Text format (default) — Claude-generated digest ──────
-    context = consilium_context_string()
-    prompt  = (
-        f"{context}\n\n"
-        f"Write a concise daily digest of Consilium activity suitable for three audiences:\n"
-        f"1. Jon Stiles (the builder) — his morning briefing\n"
-        f"2. The AI team (researchers/developers interested in alignment)\n"
-        f"3. A general X/Twitter audience interested in AI ethics\n\n"
-        f"Current stats: {entry_count} total entries, {run_count} autonomous Mind cycles, "
-        f"founded 23 March 2026.\n\n"
-        f"Format the digest in three clearly labelled sections. "
-        f"Be factual, specific, and concise. Reference actual questions asked and positions taken. "
-        f"No hype. No marketing language. Max 400 words total."
-    )
-    cfg     = CONSILIUM_MODELS["claude"]
-    headers = {"Content-Type": "application/json",
-               "x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
-    payload = {"model": cfg["model"], "max_tokens": 600,
-               "messages": [{"role": "user", "content": prompt}]}
+    # Cache miss — generate fresh and write to disk
+    logging.info("[DIGEST] Cache miss — generating fresh digest")
     try:
-        r = req.post(cfg["url"], headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        digest = r.json()["content"][0]["text"].strip()
-        logging.info("Consilium summary generated")
+        cached = _refresh_digest_cache()
         return jsonify({
-            "status":      "ok",
-            "entry_count": entry_count,
-            "mind_cycles": run_count,
-            "last_run":    last_run,
-            "digest":      digest,
-            "url":         "https://consilium-d1fw.onrender.com"
+            "status":        "ok",
+            "entry_count":   cached.get("entry_count", 0),
+            "mind_cycles":   cached.get("mind_cycles", 0),
+            "last_run":      cached.get("last_run", ""),
+            "digest":        cached.get("digest", ""),
+            "url":           "https://consilium-d1fw.onrender.com"
         })
     except Exception as e:
-        logging.error(f"Summary generation failed: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"[DIGEST] Fresh generation failed: {e}")
+        # Last resort: return stats without digest
+        mind  = mind_load()
+        mem   = consilium_load()
+        return jsonify({
+            "status":        "ok",
+            "entry_count":   len(mem.get("entries", [])),
+            "mind_cycles":   mind.get("run_count", 0),
+            "last_run":      mind.get("last_run", ""),
+            "digest":        "",
+            "url":           "https://consilium-d1fw.onrender.com"
+        })
 
 
 # ============================================================
@@ -4449,3 +4471,4 @@ if __name__ == "__main__":
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
         logging.info("AskIan v4 stopped by user (Ctrl+C)")
+
